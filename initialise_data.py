@@ -196,7 +196,7 @@ def initialize_chromadb_data(data_file_path: str = None, reset_collection: bool 
         
         # Initialize ChromaDB client
         logger.info("Initializing ChromaDB client...")
-        chromadb_client = ChromaDBClient(config["chromadb"])
+        chromadb_client = ChromaDBClient()
         
         # Reset collection if requested
         if reset_collection:
