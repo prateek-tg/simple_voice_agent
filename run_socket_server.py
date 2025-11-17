@@ -17,16 +17,16 @@ def main():
     """Run the socket server."""
     try:
         # Import and run the socket server
-        from socket_server import start_server
+        from socket_server import main as start_server
         
-        print("🚀 Starting Privacy Policy Chatbot Socket Server...")
-        print("� Socket endpoint: tcp://51.38.38.66:5000")
-        print("� Protocol: JSON messages over TCP (newline-delimited)")
+        print("🚀 Starting Privacy Policy Chatbot Socket.IO Server...")
+        print("🔌 Socket.IO endpoint: http://51.38.38.66:5000")
+        print("📡 Protocol: Socket.IO with WebSocket transport")
         print("Press Ctrl+C to stop the server\n")
         
         # Run the server
         start_server(
-            host='51.38.38.66',
+            host='0.0.0.0',
             port=5000
         )
         
