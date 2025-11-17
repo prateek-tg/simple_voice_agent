@@ -24,6 +24,9 @@ class ChromaDBClient:
     def __init__(self):
         """Initialize ChromaDB client and embedding model."""
         try:
+            # Store collection name
+            self.collection_name = config.chromadb_collection_name
+            
             # Ensure persist directory exists
             Path(config.chromadb_persist_directory).mkdir(parents=True, exist_ok=True)
             
@@ -204,6 +207,56 @@ class ChromaDBClient:
         except Exception as e:
             logger.error(f"Error deleting collection: {e}")
             return False
+    
+    def reset_collection(self) -> bool:
+        """
+        Reset the collection by deleting and recreating it.
+        
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Delete existing collection
+            try:
+                self.client.delete_collection(name=config.chromadb_collection_name)
+                logger.info(f"Deleted existing collection: {config.chromadb_collection_name}")
+            except Exception:
+                pass  # Collection might not exist
+            
+            # Create new collection
+            self.collection = self.client.create_collection(
+                name=config.chromadb_collection_name,
+                metadata={"description": "Privacy policy document chunks"}
+            )
+            logger.info(f"Created new collection: {config.chromadb_collection_name}")
+            return True
+        except Exception as e:
+            logger.error(f"Error resetting collection: {e}")
+            return False
+    
+    def similarity_search(self, query: str, k: int = 3) -> List[Document]:
+        """
+        Search for similar documents (Langchain compatible interface).
+        
+        Args:
+            query: Search query
+            k: Number of results to return
+            
+        Returns:
+            List of Document objects
+        """
+        try:
+            results = self.search_similar_documents(query, n_results=k)
+            documents = []
+            for result in results:
+                documents.append(Document(
+                    page_content=result['content'],
+                    metadata=result['metadata']
+                ))
+            return documents
+        except Exception as e:
+            logger.error(f"Error in similarity search: {e}")
+            return []
     
     def get_collection_info(self) -> Dict[str, Any]:
         """
