@@ -1,10 +1,14 @@
 """
-Socket.IO server for real-time chatbot communication.
+Raw Python socket server for chatbot communication.
 """
 import logging
 import os
 import sys
 from pathlib import Path
+import socket
+import json
+import threading
+import time
 
 # Load environment variables first
 from dotenv import load_dotenv
@@ -12,10 +16,6 @@ load_dotenv()
 
 # Add current directory to Python path
 sys.path.append(str(Path(__file__).parent))
-
-from flask import Flask, render_template, request
-from flask_socketio import SocketIO, emit
-import time
 
 from chatbot import ChatBot
 from config import config
@@ -27,13 +27,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Initialize Flask app and SocketIO
-app = Flask(__name__)
-app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'your-secret-key-here-change-in-production')
-socketio = SocketIO(app, cors_allowed_origins="*")
-
-# Global chatbot instance
+# Global chatbot instance and active clients
 chatbot_instance = None
+active_clients = {}
 
 def get_chatbot():
     """Get or create chatbot instance."""
@@ -44,148 +40,176 @@ def get_chatbot():
         chatbot_instance.start_session()
     return chatbot_instance
 
-def format_response_for_web(response):
-    """Format the chatbot response for better web display."""
-    if not response:
-        return response
-    
-    # Add line breaks after sentences for better readability
-    formatted = response.replace('. ', '.\n\n')
-    
-    # Add line breaks before certain phrases for structure
-    structure_phrases = [
-        'First off,', 'However,', 'As for', 'And just a quick note',
-        'So,', 'In simple terms,', 'For example,', 'Additionally,',
-        'Important:', 'Note:', 'Remember:'
-    ]
-    
-    for phrase in structure_phrases:
-        formatted = formatted.replace(phrase, f'\n{phrase}')
-    
-    # Clean up multiple line breaks
-    formatted = '\n'.join(line.strip() for line in formatted.split('\n') if line.strip())
-    
-    return formatted
+def send_message(client_socket, message_type, data):
+    """Send a JSON message to the client."""
+    try:
+        message = json.dumps({
+            'type': message_type,
+            'data': data,
+            'timestamp': time.time()
+        })
+        client_socket.sendall((message + '\n').encode('utf-8'))
+        return True
+    except Exception as e:
+        logger.error(f"Error sending message: {e}")
+        return False
 
-@app.route('/')
-def index():
-    """Serve the main chat interface."""
-    return render_template('index.html')
-
-@socketio.on('connect')
-def handle_connect():
-    """Handle client connection."""
-    logger.info(f"Client connected: {request.sid}")
-    emit('status', {'message': 'Connected to Privacy Policy Chatbot', 'type': 'success'})
-
-@socketio.on('disconnect')
-def handle_disconnect():
-    """Handle client disconnection."""
-    logger.info(f"Client disconnected: {request.sid}")
-
-@socketio.on('user_query')
-def handle_user_query(data):
-    """
-    Handle incoming user query and emit response.
+def handle_client(client_socket, client_address):
+    """Handle individual client connection."""
+    client_id = f"{client_address[0]}:{client_address[1]}"
+    logger.info(f"Client connected: {client_id}")
     
-    Events:
-    - 'user_query': When a query comes in
-    - 'bot_response': When a response is ready
-    """
+    active_clients[client_id] = client_socket
+    
+    # Send welcome message
+    send_message(client_socket, 'status', {
+        'message': 'Connected to Privacy Policy Chatbot',
+        'type': 'success',
+        'client_id': client_id
+    })
+    
+    buffer = ""
+    
+    try:
+        while True:
+            # Receive data from client
+            data = client_socket.recv(4096).decode('utf-8')
+            
+            if not data:
+                logger.info(f"Client disconnected: {client_id}")
+                break
+            
+            buffer += data
+            
+            # Process complete messages (separated by newlines)
+            while '\n' in buffer:
+                line, buffer = buffer.split('\n', 1)
+                line = line.strip()
+                
+                if not line:
+                    continue
+                
+                try:
+                    message = json.loads(line)
+                    handle_message(client_socket, message, client_id)
+                except json.JSONDecodeError as e:
+                    logger.error(f"Invalid JSON from {client_id}: {e}")
+                    send_message(client_socket, 'error', {
+                        'message': 'Invalid JSON format'
+                    })
+    
+    except Exception as e:
+        logger.error(f"Error handling client {client_id}: {e}")
+    
+    finally:
+        # Clean up
+        if client_id in active_clients:
+            del active_clients[client_id]
+        client_socket.close()
+        logger.info(f"Connection closed: {client_id}")
+
+def handle_message(client_socket, message, client_id):
+    """Handle different message types from client."""
+    msg_type = message.get('type', '')
+    data = message.get('data', {})
+    
+    logger.info(f"Received message from {client_id}: {msg_type}")
+    
+    if msg_type == 'user_query':
+        handle_user_query(client_socket, data, client_id)
+    
+    elif msg_type == 'health_check':
+        handle_health_check(client_socket)
+    
+    elif msg_type == 'get_stats':
+        handle_get_stats(client_socket)
+    
+    else:
+        send_message(client_socket, 'error', {
+            'message': f'Unknown message type: {msg_type}'
+        })
+
+def handle_user_query(client_socket, data, client_id):
+    """Handle incoming user query."""
     try:
         user_message = data.get('message', '').strip()
         
         if not user_message:
-            emit('error', {'message': 'Empty message received'})
+            send_message(client_socket, 'error', {
+                'message': 'Empty message received'
+            })
             return
         
-        logger.info(f"Received query: {user_message}")
+        logger.info(f"Processing query from {client_id}: {user_message}")
         
-        # Emit acknowledgment that query was received
-        emit('query_received', {
+        # Send acknowledgment
+        send_message(client_socket, 'query_received', {
             'message': user_message,
-            'timestamp': time.time(),
             'status': 'processing'
         })
         
         # Get chatbot instance and process message
         chatbot = get_chatbot()
-        
-        # Process the message (this might take some time)
         response = chatbot.process_message(user_message)
         
         logger.info(f"Generated response: {response[:100]}...")
         
-        # Format response for better readability
-        formatted_response = format_response_for_web(response)
-        
-        # Check if this was a goodbye intent - if so, prepare to end session
+        # Check if this was a goodbye intent
         chatbot_agent = chatbot.agent
         intent = chatbot_agent.classify_intent(user_message)
         is_goodbye = (intent.value == 'goodbye')
         
-        # Emit the bot response
-        emit('bot_response', {
-            'message': formatted_response,
-            'timestamp': time.time(),
+        # Send the bot response
+        send_message(client_socket, 'bot_response', {
+            'message': response,
             'original_query': user_message,
             'is_goodbye': is_goodbye
         })
         
-        # If this was a goodbye, end the session after a brief delay
+        # If goodbye, end session
         if is_goodbye:
             logger.info("Goodbye detected - ending session")
-            # Let the client know to prepare for disconnection
-            emit('session_ending', {
-                'message': 'Thank you for using our privacy assistant. Session will end shortly.',
-                'timestamp': time.time()
+            send_message(client_socket, 'session_ending', {
+                'message': 'Thank you for using our privacy assistant. Session will end shortly.'
             })
-            
-            # End the chatbot session
             chatbot.end_session()
             
-            # Disconnect the client after a brief delay (2 seconds)
-            import threading
-            def disconnect_client():
-                import time
-                time.sleep(2)
-                try:
-                    from flask_socketio import disconnect
-                    disconnect()
-                except Exception as e:
-                    logger.error(f"Error disconnecting client: {e}")
-            
-            threading.Thread(target=disconnect_client).start()
-        
+            # Close connection after brief delay
+            time.sleep(2)
+            client_socket.close()
+    
     except Exception as e:
         logger.error(f"Error processing query: {e}")
-        emit('error', {
+        send_message(client_socket, 'error', {
             'message': 'Sorry, I encountered an error processing your request.',
-            'error': str(e),
-            'timestamp': time.time()
+            'error': str(e)
         })
 
-@socketio.on('health_check')
-def handle_health_check():
+def handle_health_check(client_socket):
     """Handle health check request."""
     try:
         chatbot = get_chatbot()
         health_status = chatbot.health_check()
-        emit('health_status', health_status)
+        send_message(client_socket, 'health_status', health_status)
     except Exception as e:
         logger.error(f"Health check failed: {e}")
-        emit('error', {'message': 'Health check failed', 'error': str(e)})
+        send_message(client_socket, 'error', {
+            'message': 'Health check failed',
+            'error': str(e)
+        })
 
-@socketio.on('get_stats')
-def handle_get_stats():
+def handle_get_stats(client_socket):
     """Handle request for session statistics."""
     try:
         chatbot = get_chatbot()
         stats = chatbot.get_session_stats()
-        emit('session_stats', stats)
+        send_message(client_socket, 'session_stats', stats)
     except Exception as e:
         logger.error(f"Failed to get stats: {e}")
-        emit('error', {'message': 'Failed to get statistics', 'error': str(e)})
+        send_message(client_socket, 'error', {
+            'message': 'Failed to get statistics',
+            'error': str(e)
+        })
 
 def check_environment():
     """Check if all required environment variables are set."""
@@ -201,6 +225,42 @@ def check_environment():
     
     return issues
 
+def start_server(host='0.0.0.0', port=5000):
+    """Start the socket server."""
+    # Create socket
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    
+    try:
+        server_socket.bind((host, port))
+        server_socket.listen(5)
+        
+        logger.info(f"🚀 Socket server started on {host}:{port}")
+        print(f"🚀 Socket server listening on {host}:{port}")
+        print(f"🔌 Waiting for connections...")
+        print(f"Press Ctrl+C to stop\n")
+        
+        while True:
+            # Accept client connection
+            client_socket, client_address = server_socket.accept()
+            
+            # Handle client in a separate thread
+            client_thread = threading.Thread(
+                target=handle_client,
+                args=(client_socket, client_address),
+                daemon=True
+            )
+            client_thread.start()
+    
+    except KeyboardInterrupt:
+        print("\n� Server shutting down...")
+    except Exception as e:
+        logger.error(f"Server error: {e}")
+        print(f"❌ Server error: {e}")
+    finally:
+        server_socket.close()
+        logger.info("Server socket closed")
+
 if __name__ == '__main__':
     try:
         # Check environment
@@ -211,17 +271,8 @@ if __name__ == '__main__':
                 print(f"   • {issue}")
             sys.exit(1)
         
-        print("🚀 Starting Socket.IO server...")
-        print("📱 Chat interface will be available at: http://localhost:5000")
-        
-        # Run the SocketIO server
-        socketio.run(
-            app, 
-            host='0.0.0.0', 
-            port=5000, 
-            debug=False,  # Set to True for development
-            allow_unsafe_werkzeug=True
-        )
+        # Start the raw socket server
+        start_server(host='0.0.0.0', port=5000)
         
     except KeyboardInterrupt:
         print("\n👋 Server shutting down...")

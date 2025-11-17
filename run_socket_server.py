@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Simple script to run the socket server with proper environment setup.
+Simple script to run the raw socket server with proper environment setup.
 """
 import os
 import sys
@@ -17,20 +17,17 @@ def main():
     """Run the socket server."""
     try:
         # Import and run the socket server
-        from socket_server import app, socketio
+        from socket_server import start_server
         
         print("🚀 Starting Privacy Policy Chatbot Socket Server...")
-        print("📱 Web interface: http://localhost:5000")
-        print("🔌 Socket.IO endpoint: ws://localhost:5000/socket.io/")
+        print("� Socket endpoint: tcp://51.38.38.66:5000")
+        print("� Protocol: JSON messages over TCP (newline-delimited)")
         print("Press Ctrl+C to stop the server\n")
         
         # Run the server
-        socketio.run(
-            app,
-            host='0.0.0.0',
-            port=5000,
-            debug=False,
-            allow_unsafe_werkzeug=True
+        start_server(
+            host='51.38.38.66',
+            port=5000
         )
         
     except KeyboardInterrupt:
