@@ -90,6 +90,11 @@ async def disconnect(sid):
         logger.info(f"🗑️ Session cleaned up for client {sid}")
 
 @sio.event
+async def query(sid, data):
+    """Handle query event from client (alias for user_query)"""
+    await user_query(sid, data)
+
+@sio.event
 async def user_query(sid, data):
     """Handle user_query event from client"""
     try:
@@ -101,7 +106,7 @@ async def user_query(sid, data):
         
         # Extract query text
         if isinstance(data, dict):
-            query_text = data.get('message', '')
+            query_text = data.get('message', '') or data.get('query', '')
         else:
             query_text = str(data)
         
