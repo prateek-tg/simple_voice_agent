@@ -1,14 +1,16 @@
+#!/usr/bin/env python3
 """
-Raw Python socket server for chatbot communication.
+Socket.IO Server for Privacy Policy Chatbot
+Works with frontend using socket.io-client
 """
+
+import socketio
 import logging
+import asyncio
 import os
 import sys
 from pathlib import Path
-import socket
-import json
-import threading
-import time
+from aiohttp import web
 
 # Load environment variables first
 from dotenv import load_dotenv
@@ -27,189 +29,198 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Global chatbot instance and active clients
-chatbot_instance = None
-active_clients = {}
+# Create Socket.IO server with CORS enabled
+sio = socketio.AsyncServer(
+    cors_allowed_origins='*',  # Allow all origins for development
+    async_mode='aiohttp',
+    logger=True,
+    engineio_logger=True
+)
 
-def get_chatbot():
-    """Get or create chatbot instance."""
-    global chatbot_instance
-    if chatbot_instance is None:
-        chatbot_instance = ChatBot()
-        # Start a session for the chatbot
-        chatbot_instance.start_session()
-    return chatbot_instance
+app = web.Application()
+sio.attach(app)
 
-def send_message(client_socket, message_type, data):
-    """Send a JSON message to the client."""
-    try:
-        message = json.dumps({
-            'type': message_type,
-            'data': data,
-            'timestamp': time.time()
-        })
-        client_socket.sendall((message + '\n').encode('utf-8'))
-        return True
-    except Exception as e:
-        logger.error(f"Error sending message: {e}")
-        return False
+# Store client sessions
+clients = {}
 
-def handle_client(client_socket, client_address):
-    """Handle individual client connection."""
-    client_id = f"{client_address[0]}:{client_address[1]}"
-    logger.info(f"Client connected: {client_id}")
-    
-    active_clients[client_id] = client_socket
-    
-    # Send welcome message
-    send_message(client_socket, 'status', {
-        'message': 'Connected to Privacy Policy Chatbot',
-        'type': 'success',
-        'client_id': client_id
-    })
-    
-    buffer = ""
+@sio.event
+async def connect(sid, environ, auth=None):
+    """Handle client connection with optional auth data"""
+    logger.info(f"🔗 Client {sid} connected")
+    if auth:
+        logger.info(f"📋 Connection data: {auth}")
     
     try:
-        while True:
-            # Receive data from client
-            data = client_socket.recv(4096).decode('utf-8')
-            
-            if not data:
-                logger.info(f"Client disconnected: {client_id}")
-                break
-            
-            buffer += data
-            
-            # Process complete messages (separated by newlines)
-            while '\n' in buffer:
-                line, buffer = buffer.split('\n', 1)
-                line = line.strip()
-                
-                if not line:
-                    continue
-                
-                try:
-                    message = json.loads(line)
-                    handle_message(client_socket, message, client_id)
-                except json.JSONDecodeError as e:
-                    logger.error(f"Invalid JSON from {client_id}: {e}")
-                    send_message(client_socket, 'error', {
-                        'message': 'Invalid JSON format'
-                    })
-    
-    except Exception as e:
-        logger.error(f"Error handling client {client_id}: {e}")
-    
-    finally:
-        # Clean up
-        if client_id in active_clients:
-            del active_clients[client_id]
-        client_socket.close()
-        logger.info(f"Connection closed: {client_id}")
-
-def handle_message(client_socket, message, client_id):
-    """Handle different message types from client."""
-    msg_type = message.get('type', '')
-    data = message.get('data', {})
-    
-    logger.info(f"Received message from {client_id}: {msg_type}")
-    
-    if msg_type == 'user_query':
-        handle_user_query(client_socket, data, client_id)
-    
-    elif msg_type == 'health_check':
-        handle_health_check(client_socket)
-    
-    elif msg_type == 'get_stats':
-        handle_get_stats(client_socket)
-    
-    else:
-        send_message(client_socket, 'error', {
-            'message': f'Unknown message type: {msg_type}'
-        })
-
-def handle_user_query(client_socket, data, client_id):
-    """Handle incoming user query."""
-    try:
-        user_message = data.get('message', '').strip()
+        # Create individual session for this client
+        chatbot = ChatBot()
+        chatbot.start_session()
         
-        if not user_message:
-            send_message(client_socket, 'error', {
-                'message': 'Empty message received'
-            })
+        clients[sid] = {
+            'chatbot': chatbot
+        }
+        
+        # Send greeting
+        await sio.emit('status', {
+            'message': 'Connected to Privacy Policy Chatbot',
+            'type': 'success'
+        }, room=sid)
+        
+        logger.info(f"✅ Session created for client {sid}")
+        
+    except Exception as e:
+        error_message = str(e)
+        logger.error(f"Error creating session for {sid}: {e}")
+        
+        await sio.emit('error', {
+            'message': f'Failed to create session: {error_message}'
+        }, room=sid)
+
+@sio.event
+async def disconnect(sid):
+    """Handle client disconnection"""
+    logger.info(f"🔌 Client {sid} disconnected")
+    
+    if sid in clients:
+        chatbot = clients[sid]['chatbot']
+        try:
+            chatbot.end_session()
+        except:
+            pass
+        del clients[sid]
+        logger.info(f"🗑️ Session cleaned up for client {sid}")
+
+@sio.event
+async def query(sid, data):
+    """Handle query event from client (alias for user_query)"""
+    await user_query(sid, data)
+
+@sio.event
+async def user_query(sid, data):
+    """Handle user_query event from client"""
+    try:
+        if sid not in clients:
+            await sio.emit('error', {
+                'message': 'Session not found'
+            }, room=sid)
             return
         
-        logger.info(f"Processing query from {client_id}: {user_message}")
+        # Extract query text
+        if isinstance(data, dict):
+            query_text = data.get('message', '') or data.get('query', '')
+        else:
+            query_text = str(data)
+        
+        if not query_text or not query_text.strip():
+            await sio.emit('error', {
+                'message': 'Empty query'
+            }, room=sid)
+            return
+        
+        client_data = clients[sid]
+        chatbot = client_data['chatbot']
+        
+        logger.info(f"💬 Client {sid}: '{query_text}'")
         
         # Send acknowledgment
-        send_message(client_socket, 'query_received', {
-            'message': user_message,
+        await sio.emit('query_received', {
+            'message': query_text,
             'status': 'processing'
-        })
+        }, room=sid)
         
-        # Get chatbot instance and process message
-        chatbot = get_chatbot()
-        response = chatbot.process_message(user_message)
-        
-        logger.info(f"Generated response: {response[:100]}...")
-        
-        # Check if this was a goodbye intent
-        chatbot_agent = chatbot.agent
-        intent = chatbot_agent.classify_intent(user_message)
-        is_goodbye = (intent.value == 'goodbye')
-        
-        # Send the bot response
-        send_message(client_socket, 'bot_response', {
-            'message': response,
-            'original_query': user_message,
-            'is_goodbye': is_goodbye
-        })
-        
-        # If goodbye, end session
-        if is_goodbye:
-            logger.info("Goodbye detected - ending session")
-            send_message(client_socket, 'session_ending', {
-                'message': 'Thank you for using our privacy assistant. Session will end shortly.'
-            })
-            chatbot.end_session()
+        try:
+            # Process query
+            logger.info(f"🔄 Processing query for {sid}...")
             
-            # Close connection after brief delay
-            time.sleep(2)
-            client_socket.close()
-    
+            # Run in executor to avoid blocking
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                chatbot.process_message,
+                query_text
+            )
+            
+            logger.info(f"✅ Client {sid} processing completed")
+            
+            # Send response
+            await sio.emit('bot_response', {
+                'message': response,
+                'original_query': query_text
+            }, room=sid)
+            
+            logger.info(f"📤 Sent to client {sid}: {response[:50]}...")
+            
+        except Exception as e:
+            logger.error(f"Error processing query for {sid}: {e}")
+            await sio.emit('error', {
+                'message': f'Processing error: {str(e)}'
+            }, room=sid)
+            
     except Exception as e:
-        logger.error(f"Error processing query: {e}")
-        send_message(client_socket, 'error', {
-            'message': 'Sorry, I encountered an error processing your request.',
-            'error': str(e)
-        })
+        logger.error(f"Error handling query for {sid}: {e}")
+        await sio.emit('error', {
+            'message': str(e)
+        }, room=sid)
 
-def handle_health_check(client_socket):
-    """Handle health check request."""
+@sio.event
+async def health_check(sid, data=None):
+    """Handle health_check event from client"""
     try:
-        chatbot = get_chatbot()
-        health_status = chatbot.health_check()
-        send_message(client_socket, 'health_status', health_status)
+        if sid not in clients:
+            await sio.emit('error', {
+                'message': 'Session not found'
+            }, room=sid)
+            return
+        
+        chatbot = clients[sid]['chatbot']
+        
+        loop = asyncio.get_event_loop()
+        health_status = await loop.run_in_executor(
+            None,
+            chatbot.health_check
+        )
+        
+        await sio.emit('health_status', health_status, room=sid)
+        
     except Exception as e:
-        logger.error(f"Health check failed: {e}")
-        send_message(client_socket, 'error', {
-            'message': 'Health check failed',
-            'error': str(e)
-        })
+        logger.error(f"Health check failed for {sid}: {e}")
+        await sio.emit('error', {
+            'message': f'Health check failed: {str(e)}'
+        }, room=sid)
 
-def handle_get_stats(client_socket):
-    """Handle request for session statistics."""
+@sio.event
+async def get_stats(sid, data=None):
+    """Handle get_stats event from client"""
     try:
-        chatbot = get_chatbot()
-        stats = chatbot.get_session_stats()
-        send_message(client_socket, 'session_stats', stats)
+        if sid not in clients:
+            await sio.emit('error', {
+                'message': 'Session not found'
+            }, room=sid)
+            return
+        
+        chatbot = clients[sid]['chatbot']
+        
+        loop = asyncio.get_event_loop()
+        stats = await loop.run_in_executor(
+            None,
+            chatbot.get_session_stats
+        )
+        
+        await sio.emit('session_stats', stats, room=sid)
+        
     except Exception as e:
-        logger.error(f"Failed to get stats: {e}")
-        send_message(client_socket, 'error', {
-            'message': 'Failed to get statistics',
-            'error': str(e)
-        })
+        logger.error(f"Failed to get stats for {sid}: {e}")
+        await sio.emit('error', {
+            'message': f'Failed to get statistics: {str(e)}'
+        }, room=sid)
+
+# Health check endpoint
+async def health(request):
+    """Health check endpoint"""
+    return web.Response(text='Socket.IO Server Running')
+
+# Add routes
+app.router.add_get('/', health)
+app.router.add_get('/health', health)
 
 def check_environment():
     """Check if all required environment variables are set."""
@@ -225,41 +236,15 @@ def check_environment():
     
     return issues
 
-def start_server(host='0.0.0.0', port=5000):
-    """Start the socket server."""
-    # Create socket
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+def main(host='0.0.0.0', port=5000):
+    """Start the Socket.IO server"""
+    logger.info(f"🚀 Starting Socket.IO Server on {host}:{port}")
+    logger.info("� Each client gets their own session")
+    logger.info("🗑️ Sessions expire when clients disconnect")
+    logger.info("🌐 CORS enabled for frontend integration")
+    logger.info("-" * 50)
     
-    try:
-        server_socket.bind((host, port))
-        server_socket.listen(5)
-        
-        logger.info(f"🚀 Socket server started on {host}:{port}")
-        print(f"🚀 Socket server listening on {host}:{port}")
-        print(f"🔌 Waiting for connections...")
-        print(f"Press Ctrl+C to stop\n")
-        
-        while True:
-            # Accept client connection
-            client_socket, client_address = server_socket.accept()
-            
-            # Handle client in a separate thread
-            client_thread = threading.Thread(
-                target=handle_client,
-                args=(client_socket, client_address),
-                daemon=True
-            )
-            client_thread.start()
-    
-    except KeyboardInterrupt:
-        print("\n� Server shutting down...")
-    except Exception as e:
-        logger.error(f"Server error: {e}")
-        print(f"❌ Server error: {e}")
-    finally:
-        server_socket.close()
-        logger.info("Server socket closed")
+    web.run_app(app, host=host, port=port)
 
 if __name__ == '__main__':
     try:
@@ -271,8 +256,8 @@ if __name__ == '__main__':
                 print(f"   • {issue}")
             sys.exit(1)
         
-        # Start the raw socket server
-        start_server(host='0.0.0.0', port=5000)
+        # Start the Socket.IO server
+        main(host='0.0.0.0', port=5000)
         
     except KeyboardInterrupt:
         print("\n👋 Server shutting down...")
