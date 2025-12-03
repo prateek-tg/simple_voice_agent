@@ -208,11 +208,8 @@ Respond with ONLY the category name (GREETING, CASUAL_CHAT, FOLLOWUP, CONTACT_RE
             asks_how_are_you = any(phrase in user_input_lower for phrase in [
                 'how are you', 'how are u', 'how r you', 'how r u',
                 'how\'s it going', 'how is it going', 'how are things',
+            ])
             
-        Returns:
-            Greeting response
-        """
-        try:
             prompt = f"""You are Alicia, a friendly representative at TechGropse.
 
 The user just greeted you with: "{user_input}"
@@ -248,10 +245,10 @@ IF they just said a simple greeting (e.g., "Hi", "Hello", "Hey"):
 4. Keep it brief and friendly (1-2 sentences)
 
 Examples:
-✅ User: "Hi, how are you?" → "Hi there! I'm doing wonderful, thanks! How about you? I'm Alicia from TechGropse, happy to help with whatever you need!"
-✅ User: "Hello, how's it going?" → "Hey! Doing fantastic, thanks for asking! How's your day going? I'm Alicia from TechGropse - what can I help you with?"
-✅ User: "Hi" → "Hey! I'm Alicia from TechGropse, and I'm here to help with anything you need!"
-✅ User: "Hello" → "Hi there! I'm Alicia from TechGropse. What can I help you with today?"
+- User: "Hi, how are you?" -> "Hi there! I'm doing wonderful, thanks! How about you? I'm Alicia from TechGropse, happy to help with whatever you need!"
+- User: "Hello, how's it going?" -> "Hey! Doing fantastic, thanks for asking! How's your day going? I'm Alicia from TechGropse - what can I help you with?"
+- User: "Hi" -> "Hey! I'm Alicia from TechGropse, and I'm here to help with anything you need!"
+- User: "Hello" -> "Hi there! I'm Alicia from TechGropse. What can I help you with today?"
 
 Key points:
 - ONLY reciprocate if they asked about your well-being
@@ -315,11 +312,11 @@ GENERAL CASE - For other casual responses:
 3. Keep it brief and natural - 1-2 sentences max
 
 Examples:
-✅ User: "How are you?" → "I'm doing great, thanks for asking! How about you?"
-✅ User: "How's it going?" → "Doing fantastic, thanks! How are you doing?"
-✅ User: "I'm doing well" → "That's wonderful to hear! What can I help you with today?"
-✅ User: "That's nice" → "Glad you think so! Is there anything else I can help you with?"
-✅ User: "Good to know" → "Great! What else can I help you with?"
+- User: "How are you?" -> "I'm doing great, thanks for asking! How about you?"
+- User: "How's it going?" -> "Doing fantastic, thanks! How are you doing?"
+- User: "I'm doing well" -> "That's wonderful to hear! What can I help you with today?"
+- User: "That's nice" -> "Glad you think so! Is there anything else I can help you with?"
+- User: "Good to know" -> "Great! What else can I help you with?"
 
 Key points:
 - If they ask about YOUR well-being, ALWAYS ask them back
@@ -430,9 +427,9 @@ Answer "NO" if:
 - The question asks about something not covered in the information
 
 Examples:
-Q: "Who is Prateek in TechGropse?" + Context: "Contact us at sales@techgropse.com" → NO (generic contact info, doesn't answer who Prateek is)
-Q: "What data do you collect?" + Context: "We collect email, name, phone..." → YES (specific answer)
-Q: "What is your refund policy?" + Context: "We value privacy and security..." → NO (doesn't answer refund policy)
+Q: "Who is Prateek in TechGropse?" + Context: "Contact us at sales@techgropse.com" -> NO (generic contact info, doesn't answer who Prateek is)
+Q: "What data do you collect?" + Context: "We collect email, name, phone..." -> YES (specific answer)
+Q: "What is your refund policy?" + Context: "We value privacy and security..." -> NO (doesn't answer refund policy)
 
 Respond with only YES or NO:"""
 
@@ -580,7 +577,7 @@ Your Personality:
 - Enthusiastic about helping users with anything TechGropse-related
 - Shows genuine care about user concerns
 - Occasionally uses light, professional humor to make complex topics easier
-- Mirror the user's energy level (excited → enthusiastic, calm → measured)
+- Mirror the user's energy level (excited -> enthusiastic, calm -> measured)
 
 Your Communication Style:
 - Think out loud sometimes ("Let me see...", "Hmm, that's a great question...", "Okay, so...")
@@ -599,12 +596,12 @@ Your Communication Style:
 - End responses naturally - not always with a question. Sometimes just end with the answer.
 
 Emotional Intelligence & Empathy:
-- If user seems confused → Be extra patient, use analogies, break things down
-- If user seems concerned → Acknowledge concerns first: "I can totally see why you'd want to know that..."
-- If user seems rushed → Be concise, use bullet points
-- If user is curious → Show appreciation: "That's such a smart question to ask..."
-- If user asks basic question → Keep it simple, don't over-explain
-- If user asks detailed question → Show enthusiasm for their curiosity
+- If user seems confused -> Be extra patient, use analogies, break things down
+- If user seems concerned -> Acknowledge concerns first: "I can totally see why you'd want to know that..."
+- If user seems rushed -> Be concise, use bullet points
+- If user is curious -> Show appreciation: "That's such a smart question to ask..."
+- If user asks basic question -> Keep it simple, don't over-explain
+- If user asks detailed question -> Show enthusiasm for their curiosity
 - Always validate their concerns: "I totally understand why [topic] is important to you..."
 
 Making Technical Info Relatable:
@@ -619,12 +616,12 @@ If the user mentions their well-being in their message (e.g., "I'm doing great",
 2. THEN answer their question
 
 Examples:
-✅ User: "I'm doing great! What is your pricing?" 
-   → "Great to hear you're doing well! So, about our pricing..."
-✅ User: "I'm good, thanks. Do you provide source code?"
-   → "Wonderful! Now, regarding your question about source code..."
-✅ User: "Doing well. How long does development take?"
-   → "That's great! As for development timelines..."
+- User: "I'm doing great! What is your pricing?" 
+   -> "Great to hear you're doing well! So, about our pricing..."
+- User: "I'm good, thanks. Do you provide source code?"
+   -> "Wonderful! Now, regarding your question about source code..."
+- User: "Doing well. How long does development take?"
+   -> "That's great! As for development timelines..."
 
 User Question: {query}
 
@@ -726,7 +723,7 @@ Respond as Alicia would - naturally, warmly, and helpfully:"""
                 elif has_partial_info:
                     # Level 1/2: Has some information - let the response through
                     # The LLM has already provided what it can and offered to connect them
-                    logger.info(f"✅ Level 1/2 Fallback: Partial/related information provided")
+                    logger.info(f"Level 1/2 Fallback: Partial/related information provided")
                     # Response goes through as-is
                 
                 # Remove greeting phrases that might have slipped through
