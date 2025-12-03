@@ -1,5 +1,5 @@
 """
-Main entry point for the Privacy Policy Chatbot application.
+Main entry point for the TechGropse Virtual Representative application.
 """
 import logging
 import os
@@ -97,11 +97,11 @@ def display_banner():
     """Display application banner."""
     banner = """
 ╔══════════════════════════════════════════════════════════════════════════════╗
-║                        Privacy Policy Chatbot                               ║
+║                     TechGropse Virtual Representative                      ║
 ║                           Powered by CrewAI                                 ║
 ╠══════════════════════════════════════════════════════════════════════════════╣
-║  An intelligent assistant to help you understand TechGropse's privacy       ║
-║  policy and answer questions about data collection and usage.               ║
+║  An intelligent virtual assistant to help you with all aspects of          ║
+║  TechGropse - services, pricing, privacy, careers, and more.                ║
 ╚══════════════════════════════════════════════════════════════════════════════╝
     """
     print(banner)

@@ -32,11 +32,21 @@ class Settings(BaseSettings):
     embedding_model: str = "all-MiniLM-L6-v2"
     
     # Chunking Configuration
-    chunk_size: int = 1000
-    chunk_overlap: int = 200
+    chunk_size: int = 300
+    chunk_overlap: int = 100
     
     # Data Configuration
     data_file_path: str = "./data/info.txt"
+    
+    # Reranking Configuration
+    enable_reranking: bool = True
+    reranker_model: str = "cross-encoder/ms-marco-MiniLM-L6-v2"
+    rerank_top_k: int = 5  # Number of documents to return after reranking
+    rerank_candidates: int = 15  # Number of candidates to retrieve before reranking
+    
+    # MongoDB Configuration
+    mongodb_uri: str = ""
+    mongodb_database: str = "voicechatbot"
     
     model_config = {
         "env_file": ".env",

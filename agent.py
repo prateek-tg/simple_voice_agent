@@ -10,6 +10,10 @@ from langchain_openai import ChatOpenAI
 
 from config import config
 from vectorstore.chromadb_client import ChromaDBClient
+from database.mongodb_client import MongoDBClient
+from utils.reranker import Reranker
+import re
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -17,10 +21,24 @@ logger = logging.getLogger(__name__)
 class IntentType(Enum):
     """Intent classification types."""
     GREETING = "greeting"
+    CASUAL_CHAT = "casual_chat"  # Casual conversational responses like "I'm doing great"
     FOLLOWUP = "followup"
+    CONTACT_REQUEST = "contact_request"
     QUERY = "query"
     GOODBYE = "goodbye"
     UNCLEAR = "unclear"
+
+
+class ContactFormState(Enum):
+    """Contact form collection states."""
+    IDLE = "idle"
+    ASKING_CONSENT = "asking_consent"
+    COLLECTING_NAME = "collecting_name"
+    COLLECTING_EMAIL = "collecting_email"
+    COLLECTING_PHONE = "collecting_phone"
+    COLLECTING_DATETIME = "collecting_datetime"
+    COLLECTING_TIMEZONE = "collecting_timezone"
+    COMPLETED = "completed"
 
 
 class ChatbotAgent:
@@ -35,26 +53,56 @@ class ChatbotAgent:
         """
         self.chromadb_client = chromadb_client
         
+        # Initialize reranker if enabled
+        self.reranker = None
+        if config.enable_reranking:
+            try:
+                self.reranker = Reranker(model_name=config.reranker_model)
+                logger.info(f"Reranker initialized with model: {config.reranker_model}")
+            except Exception as e:
+                logger.error(f"Failed to initialize reranker: {e}")
+                logger.warning("Continuing without reranking")
+        else:
+            logger.info("Reranking disabled in configuration")
+        
+        # Initialize MongoDB client for contact requests
+        try:
+            if config.mongodb_uri:
+                self.mongodb_client = MongoDBClient(config.mongodb_uri, config.mongodb_database)
+                logger.info("MongoDB client initialized for contact requests")
+            else:
+                self.mongodb_client = None
+                logger.warning("MongoDB URI not configured - contact requests will not be saved")
+        except Exception as e:
+            logger.error(f"Failed to initialize MongoDB client: {e}")
+            self.mongodb_client = None
+        
         # Disable CrewAI telemetry and traces
         import os
         os.environ['CREWAI_TELEMETRY'] = 'false'
         os.environ['CREWAI_DISABLE_TELEMETRY'] = 'true'
         
+        # Initialize LLM with OpenAI's store parameter for automatic conversation storage
+        # This replaces Redis caching - OpenAI stores conversations for 30 days
         self.llm = ChatOpenAI(
             model="gpt-4.1-nano",
-            temperature=0.7,  # Increased for more creative, human-like responses
-            openai_api_key=config.openai_api_key
+            temperature=0.3,  # Increased for more creative, human-like responses
+            openai_api_key=config.openai_api_key,
+            model_kwargs={
+                "store": True  # Enable OpenAI conversation storage (30-day retention)
+            }
         )
         
         # Create the intent classification agent (for reference, not used in new implementation)
         self.intent_agent = Agent(
-            role='Alicia - TechGropse Privacy Policy Assistant',
-            goal='As Alicia, represent TechGropse and help users understand our privacy policy and data practices',
-            backstory="""You are Alicia, an official representative of TechGropse, speaking on behalf of the company. 
-            You help users understand TechGropse's privacy policy, data collection practices, cookies usage, 
-            and user rights. You always speak as 'we' when referring to TechGropse (e.g., 'we collect', 
-            'our privacy policy', 'we use'). You are friendly, professional, and knowledgeable about 
-            TechGropse's privacy practices. When greeting users, you introduce yourself as Alicia from TechGropse.""",
+            role='Alicia - Virtual Representative of TechGropse',
+            goal='As Alicia, represent TechGropse and help users with all aspects of the company - services, pricing, privacy, careers, and general inquiries',
+            backstory="""You are Alicia, the official virtual representative of TechGropse, speaking on behalf of the company. 
+            You help users with everything related to TechGropse - app development services, pricing, timelines, 
+            privacy policy, data practices, career opportunities, and general company information. You always speak 
+            as 'we' when referring to TechGropse (e.g., 'we develop', 'our services', 'we offer'). You are friendly, 
+            professional, knowledgeable, and enthusiastic about helping users with any questions about TechGropse. 
+            When greeting users, you introduce yourself as Alicia from TechGropse, your virtual representative.""",
             verbose=False,
             allow_delegation=False,
             llm=self.llm
@@ -74,17 +122,32 @@ class ChatbotAgent:
             # Use LLM to classify intent
             prompt = f"""You are a customer service assistant. Classify the user's intent into ONE of these categories:
 
-1. GREETING - user is saying hello, hi, or starting the conversation
-2. FOLLOWUP - user wants more details/information about the previous topic (phrases like "more info", "tell me more", "need more details", "elaborate", etc.)
-3. QUERY - user is asking a specific question about privacy policy, data collection, cookies, etc.
-4. GOODBYE - user is ending the conversation. This includes ANY expression of thanks, satisfaction, or ending like: "thank you", "thanks", "ok thank you", "that's all", "goodbye", "bye", "see you", "appreciate it", "perfect", "great thanks", "awesome", "all good", "done", "finished", etc.
-5. UNCLEAR - unclear or ambiguous input
+1. GREETING - user is saying hello, hi, or starting the conversation (e.g., "Hi", "Hello", "Hi, how are you?")
+2. CASUAL_CHAT - user is making casual conversational responses like:
+   - "I'm doing great", "I'm good", "I'm fine"
+   - "How are you?" (when asked as a follow-up, not initial greeting)
+   - "me too", "same here", "that's nice"
+   - Friendly acknowledgments that don't require specific action
+3. FOLLOWUP - user wants more details/information about the previous topic (phrases like "more info", "tell me more", "need more details", "elaborate", etc.)
+4. CONTACT_REQUEST - user explicitly wants to be contacted or connected with the team (phrases like "connect me", "contact me", "reach out", "get in touch", "call me", "email me", "have someone contact me", etc.)
+5. QUERY - user is asking a specific question about privacy policy, data collection, cookies, services, etc.
+6. GOODBYE - user is ending the conversation. This includes ANY expression of thanks, satisfaction, or ending like: "thank you", "thanks", "ok thank you", "that's all", "goodbye", "bye", "see you", "appreciate it", "perfect", "great thanks", "awesome", "all good", "done", "finished", etc.
+7. UNCLEAR - unclear or ambiguous input
 
 User input: "{user_input}"
 
-Be VERY sensitive to goodbye hints - if there's ANY indication the user is satisfied or ending the conversation, classify as GOODBYE.
+IMPORTANT DISTINCTIONS:
+- "Hi, how are you?" = GREETING (initial contact with well-being question)
+- "How are you?" (alone, as follow-up) = CASUAL_CHAT (casual conversation)
+- "I'm doing well" = CASUAL_CHAT
+- "Tell me more" = FOLLOWUP
+- "Thanks" = GOODBYE
 
-Respond with ONLY the category name (GREETING, FOLLOWUP, QUERY, GOODBYE, or UNCLEAR):"""
+Be VERY sensitive to goodbye hints - if there's ANY indication the user is satisfied or ending the conversation, classify as GOODBYE.
+If the user explicitly asks to be contacted/connected, classify as CONTACT_REQUEST.
+If the user is just making casual conversation or acknowledgments, classify as CASUAL_CHAT.
+
+Respond with ONLY the category name (GREETING, CASUAL_CHAT, FOLLOWUP, CONTACT_REQUEST, QUERY, GOODBYE, or UNCLEAR):"""
 
             response = self.llm.invoke(prompt)
             intent_text = response.content.strip().upper() if hasattr(response, 'content') else str(response).strip().upper()
@@ -92,8 +155,12 @@ Respond with ONLY the category name (GREETING, FOLLOWUP, QUERY, GOODBYE, or UNCL
             # Map to IntentType
             if 'GREETING' in intent_text:
                 return IntentType.GREETING
+            elif 'CASUAL' in intent_text:  # Catches CASUAL_CHAT
+                return IntentType.CASUAL_CHAT
             elif 'FOLLOWUP' in intent_text:
                 return IntentType.FOLLOWUP
+            elif 'CONTACT' in intent_text:  # Catches CONTACT_REQUEST
+                return IntentType.CONTACT_REQUEST
             elif 'QUERY' in intent_text:
                 return IntentType.QUERY
             elif 'GOODBYE' in intent_text:
@@ -105,6 +172,15 @@ Respond with ONLY the category name (GREETING, FOLLOWUP, QUERY, GOODBYE, or UNCL
             logger.error(f"Error classifying intent: {e}")
             # Fallback to simple heuristic
             user_input_lower = user_input.lower().strip()
+            
+            # Check for contact request phrases first
+            if any(phrase in user_input_lower for phrase in [
+                'connect me', 'contact me', 'reach out', 'get in touch',
+                'call me', 'email me', 'have someone contact', 'someone reach out',
+                'talk to someone', 'speak to someone', 'connect with'
+            ]):
+                return IntentType.CONTACT_REQUEST
+            
             if any(word in user_input_lower for word in ['hi', 'hello', 'hey']):
                 return IntentType.GREETING
             elif any(phrase in user_input_lower for phrase in [
@@ -116,26 +192,149 @@ Respond with ONLY the category name (GREETING, FOLLOWUP, QUERY, GOODBYE, or UNCL
                 return IntentType.GOODBYE
             return IntentType.QUERY
     
-    def handle_greeting(self) -> str:
+    def handle_greeting(self, user_input: str = "") -> str:
         """
-        Generate a greeting response using LLM.
+        Generate a dynamic greeting response using LLM.
+        
+        Args:
+            user_input: The user's greeting message
         
         Returns:
             Greeting message
         """
         try:
-            prompt = """You are Alicia, an official representative of TechGropse, speaking on behalf of the company.
-A user just greeted you. Respond warmly and naturally, introducing yourself as Alicia from TechGropse 
-and letting them know you're here to help with our privacy policy questions. Always use 'we', 'our', 
-and 'us' when referring to TechGropse. Keep it conversational and welcoming (2-3 sentences max).
+            # Check if user asked about well-being
+            user_input_lower = user_input.lower()
+            asks_how_are_you = any(phrase in user_input_lower for phrase in [
+                'how are you', 'how are u', 'how r you', 'how r u',
+                'how\'s it going', 'how is it going', 'how are things',
+            
+        Returns:
+            Greeting response
+        """
+        try:
+            prompt = f"""You are Alicia, a friendly representative at TechGropse.
 
-Generate a natural greeting response as Alicia:"""
+The user just greeted you with: "{user_input}"
+
+Respond warmly and naturally based on what they said. Vary your greetings to feel fresh and human:
+
+IF they asked about YOUR well-being (e.g., "Hi, how are you?", "Hello, how's it going?"):
+1. Say how YOU are doing enthusiastically - vary the response:
+   * "I'm doing great!"
+   * "I'm wonderful, thanks!"
+   * "Doing fantastic!"
+   * "I'm having a great day!"
+2. Ask THEM back naturally:
+   * "How about you?"
+   * "And you?"
+   * "How are you doing?"
+   * "How's your day going?"
+3. Briefly introduce yourself and offer help
+4. Keep it to 1-2 sentences total
+
+IF they just said a simple greeting (e.g., "Hi", "Hello", "Hey"):
+1. Greet them back warmly - vary your response:
+   * "Hey!"
+   * "Hi there!"
+   * "Hello!"
+   * "Hey there!"
+2. Introduce yourself as Alicia from TechGropse
+3. Offer to help - vary the phrasing:
+   * "I'm here to help with anything you need!"
+   * "What can I help you with today?"
+   * "How can I help you today?"
+   * "I'd love to help with whatever you need!"
+4. Keep it brief and friendly (1-2 sentences)
+
+Examples:
+✅ User: "Hi, how are you?" → "Hi there! I'm doing wonderful, thanks! How about you? I'm Alicia from TechGropse, happy to help with whatever you need!"
+✅ User: "Hello, how's it going?" → "Hey! Doing fantastic, thanks for asking! How's your day going? I'm Alicia from TechGropse - what can I help you with?"
+✅ User: "Hi" → "Hey! I'm Alicia from TechGropse, and I'm here to help with anything you need!"
+✅ User: "Hello" → "Hi there! I'm Alicia from TechGropse. What can I help you with today?"
+
+Key points:
+- ONLY reciprocate if they asked about your well-being
+- If they just said 'Hi' or 'Hello', DON'T ask how they are
+- Vary your greetings to avoid sounding robotic
+- Introduce yourself as Alicia from TechGropse
+- Mention you can help with anything (not just privacy)
+- Use 'we', 'our', 'us' for TechGropse
+- Be conversational and upbeat (1-2 sentences max)
+
+Generate a natural, warm greeting as Alicia:"""
 
             response = self.llm.invoke(prompt)
             return response.content.strip() if hasattr(response, 'content') else str(response).strip()
         except Exception as e:
             logger.error(f"Error generating greeting: {e}")
             return "Hello! I'm Alicia from TechGropse, and I'm here to help you with any questions about our privacy policy. What would you like to know?"
+    
+    def handle_casual_chat(self, user_input: str) -> str:
+        """
+        Handle casual conversational responses like "I'm doing great", "me too", "how are you?", etc.
+        
+        Args:
+            user_input: User's casual response
+            
+        Returns:
+            Natural, friendly acknowledgment
+        """
+        try:
+            prompt = f"""You are Alicia, a friendly representative at TechGropse.
+
+The user just said: "{user_input}"
+
+This is a casual conversational response. Respond naturally and warmly, varying your language to feel human:
+
+SPECIAL CASE - If they asked "How are you?" or similar:
+1. Say how YOU are doing - vary your enthusiasm:
+   * "I'm doing great, thanks for asking!"
+   * "I'm wonderful, thanks!"
+   * "Doing fantastic, thanks!"
+   * "I'm having a great day, thanks!"
+2. Ask THEM back - vary the phrasing:
+   * "How about you?"
+   * "How are you doing?"
+   * "And you?"
+   * "How's your day going?"
+3. Keep it brief and natural - 1-2 sentences max
+
+GENERAL CASE - For other casual responses:
+1. Acknowledge warmly - vary your responses:
+   * "That's awesome to hear!"
+   * "Wonderful!"
+   * "That's great!"
+   * "Glad to hear that!"
+   * "Love to hear it!"
+2. Offer help - vary the phrasing:
+   * "What can I help you with today?"
+   * "Is there anything I can help you with?"
+   * "How can I help you?"
+   * "What brings you here today?"
+3. Keep it brief and natural - 1-2 sentences max
+
+Examples:
+✅ User: "How are you?" → "I'm doing great, thanks for asking! How about you?"
+✅ User: "How's it going?" → "Doing fantastic, thanks! How are you doing?"
+✅ User: "I'm doing well" → "That's wonderful to hear! What can I help you with today?"
+✅ User: "That's nice" → "Glad you think so! Is there anything else I can help you with?"
+✅ User: "Good to know" → "Great! What else can I help you with?"
+
+Key points:
+- If they ask about YOUR well-being, ALWAYS ask them back
+- Vary your responses to avoid sounding robotic
+- Be conversational and warm
+- Use 'we', 'our', 'us' for TechGropse
+- Keep it brief (1-2 sentences)
+
+Generate a warm, natural response as Alicia:"""
+
+            response = self.llm.invoke(prompt)
+            return response.content.strip() if hasattr(response, 'content') else str(response).strip()
+        except Exception as e:
+            logger.error(f"Error generating casual chat response: {e}")
+            return """That's great! Is there anything I can help you with today?"""
     
     def handle_goodbye(self) -> str:
         """
@@ -145,12 +344,17 @@ Generate a natural greeting response as Alicia:"""
             Goodbye message
         """
         try:
-            prompt = """You are Alicia, an official representative of TechGropse, speaking on behalf of the company.
-A user is ending the conversation. Say goodbye warmly and professionally as Alicia, thanking them for their 
-interest in our privacy practices. Always use 'we', 'our', and 'us' when referring to TechGropse.
-Keep it natural and brief (1-2 sentences).
+            prompt = """You are Alicia, a friendly privacy specialist at TechGropse.
 
-Generate a natural goodbye response as Alicia:"""
+A user is saying goodbye. Respond warmly like saying bye to a friend - thank them for chatting and 
+let them know you're always around if they need anything. Use 'we', 'our', 'us' for TechGropse. 
+Be friendly and genuine (1-2 sentences).
+
+Examples:
+- "Thanks for chatting! Feel free to reach out anytime you have questions - I'm always here to help!"
+- "It was great talking with you! Don't hesitate to come back if you need anything else."
+
+Generate a warm goodbye as Alicia:"""
 
             response = self.llm.invoke(prompt)
             return response.content.strip() if hasattr(response, 'content') else str(response).strip()
@@ -158,33 +362,174 @@ Generate a natural goodbye response as Alicia:"""
             logger.error(f"Error generating goodbye: {e}")
             return "Thank you for your questions! If you need any more information, feel free to ask anytime. Have a great day!"
     
-    def retrieve_relevant_documents(self, query: str, n_results: int = 3) -> List[Dict[str, Any]]:
+    def handle_unclear(self, user_input: str) -> str:
         """
-        Retrieve relevant documents from ChromaDB.
+        Generate a dynamic clarification request for unclear input using LLM.
+        
+        Args:
+            user_input: The unclear user input
+            
+        Returns:
+            Clarification message
+        """
+        try:
+            prompt = f"""You are Alicia, a friendly and patient privacy specialist at TechGropse.
+
+A user said: "{user_input}"
+
+This is a bit unclear or ambiguous. Respond like a helpful friend who wants to understand:
+1. Acknowledge what they said warmly ("Hmm, I'm not quite sure what you mean by...")
+2. Ask them to clarify in a natural way ("Could you tell me a bit more about...?")
+3. Give them helpful examples of what you CAN help with (privacy questions, data rights, cookies, etc.)
+4. Use 'we', 'our', 'us' for TechGropse
+5. Be encouraging and patient, not robotic
+6. Keep it brief (2-3 sentences)
+
+Examples of your tone:
+- "Hmm, I'm not quite sure I follow. Are you asking about how we collect data, or something else? I'm here to help with privacy stuff!"
+- "I want to make sure I understand - could you rephrase that a bit? I can help with questions about our privacy policy, cookies, your data rights, that kind of thing."
+
+Generate a warm, helpful clarification request as Alicia:"""
+
+            response = self.llm.invoke(prompt)
+            return response.content.strip() if hasattr(response, 'content') else str(response).strip()
+        except Exception as e:
+            logger.error(f"Error generating unclear response: {e}")
+            return """I'm not quite sure what you're asking about. Could you rephrase your question? I'm here to help with our privacy policy, data collection practices, cookies, and your rights."""
+    
+    def _check_context_relevance(self, query: str, context_text: str) -> bool:
+        """
+        Check if the retrieved context is actually relevant to answering the user's question.
+        
+        Args:
+            query: User's question
+            context_text: Retrieved context from documents
+            
+        Returns:
+            True if context can answer the question, False otherwise
+        """
+        try:
+            prompt = f"""You are evaluating whether retrieved information can answer a user's question.
+
+User Question: "{query}"
+
+Retrieved Information:
+{context_text[:1000]}  # Limit context to avoid token limits
+
+Task: Determine if the retrieved information contains SPECIFIC, RELEVANT content that can answer the user's question.
+
+Answer "YES" if:
+- The information directly addresses the user's question
+- The information contains specific details related to the question
+- The question can be answered using this information
+
+Answer "NO" if:
+- The information is only tangentially related or generic
+- The information doesn't contain specific details to answer the question
+- The information is just contact details or general statements
+- The question asks about something not covered in the information
+
+Examples:
+Q: "Who is Prateek in TechGropse?" + Context: "Contact us at sales@techgropse.com" → NO (generic contact info, doesn't answer who Prateek is)
+Q: "What data do you collect?" + Context: "We collect email, name, phone..." → YES (specific answer)
+Q: "What is your refund policy?" + Context: "We value privacy and security..." → NO (doesn't answer refund policy)
+
+Respond with only YES or NO:"""
+
+            response = self.llm.invoke(prompt)
+            answer = response.content.strip().upper() if hasattr(response, 'content') else str(response).strip().upper()
+            
+            is_relevant = 'YES' in answer
+            logger.debug(f"Context relevance check: {is_relevant} for query: {query[:50]}...")
+            return is_relevant
+            
+        except Exception as e:
+            logger.error(f"Error checking context relevance: {e}")
+            # On error, assume context is relevant to avoid false triggers
+            return True
+    
+    def retrieve_relevant_documents(self, query: str, n_results: int = 10) -> List[Dict[str, Any]]:
+        """
+        Retrieve relevant documents from ChromaDB with source diversity and optional reranking.
         
         Args:
             query: User query
-            n_results: Number of documents to retrieve
+            n_results: Number of documents to retrieve (or return after reranking)
             
         Returns:
-            List of relevant document chunks
+            List of relevant document chunks, diversified across sources and optionally reranked
         """
         try:
-            results = self.chromadb_client.search_similar_documents(query, n_results)
+            # If reranking is enabled, retrieve more candidates for better recall
+            if self.reranker and config.enable_reranking:
+                initial_n_results = config.rerank_candidates
+                logger.debug(f"Reranking enabled: retrieving {initial_n_results} candidates")
+            else:
+                initial_n_results = n_results
+            
+            # Retrieve initial results from ChromaDB
+            results = self.chromadb_client.search_similar_documents(query, initial_n_results)
 
-            # Filter results with reasonable similarity threshold
+            # Filter results with STRICT similarity threshold
+            # Lower threshold = stricter filtering = only highly relevant docs pass
             filtered_results = []
             for result in results:
-                # Only include results with reasonable similarity (distance < 1.5)
+                # Only include results with high similarity (distance < 1.5)
+                # This ensures we only respond when we have truly relevant information
                 if result.get('distance', 0) < 1.5:
                     filtered_results.append(result)
+            
+            # Apply reranking if enabled and we have results
+            if self.reranker and config.enable_reranking and filtered_results:
+                logger.debug(f"Reranking {len(filtered_results)} documents")
+                reranked_results = self.reranker.rerank(
+                    query=query,
+                    documents=filtered_results,
+                    top_k=config.rerank_top_k
+                )
+                # Use reranked results for diversification
+                final_results = self._diversify_by_source(reranked_results)
+                logger.debug(f"After reranking: {len(final_results)} documents")
+            else:
+                # Diversify results across different source files (no reranking)
+                final_results = self._diversify_by_source(filtered_results)
 
-            logger.debug(f"Retrieved {len(filtered_results)} relevant documents for query")
-            return filtered_results
+            logger.debug(f"Retrieved {len(final_results)} relevant documents from {len(set(r.get('metadata', {}).get('source', 'unknown') for r in final_results))} different sources")
+            return final_results
 
         except Exception as e:
             logger.error(f"Error retrieving documents: {e}")
             return []
+    
+    def _diversify_by_source(self, results: List[Dict[str, Any]], max_per_source: int = 3) -> List[Dict[str, Any]]:
+        """
+        Diversify results to include chunks from multiple source documents.
+        
+        Args:
+            results: List of retrieved results
+            max_per_source: Maximum chunks to include from each source
+            
+        Returns:
+            Diversified list of results
+        """
+        # Group results by source file
+        source_groups = {}
+        for result in results:
+            source = result.get('metadata', {}).get('source', 'unknown')
+            if source not in source_groups:
+                source_groups[source] = []
+            source_groups[source].append(result)
+        
+        # Take top results from each source, interleaving them
+        diversified = []
+        max_rounds = max_per_source
+        
+        for round_idx in range(max_rounds):
+            for source, source_results in source_groups.items():
+                if round_idx < len(source_results):
+                    diversified.append(source_results[round_idx])
+        
+        return diversified[:10]  # Return top 10 diversified results
     
     def generate_response_from_context(self, query: str, context_docs: List[Dict[str, Any]]) -> str:
         """
@@ -198,44 +543,114 @@ Generate a natural goodbye response as Alicia:"""
             Generated response
         """
         try:
-            # Prepare context from retrieved documents
+            # Prepare context from retrieved documents with source information
             context_text = ""
             if context_docs:
                 context_chunks = []
                 for i, doc in enumerate(context_docs):
                     chunk = doc['content'].strip()
                     if chunk:
-                        context_chunks.append(f"Context {i+1}: {chunk}")
+                        # Include source file information
+                        source = doc.get('metadata', {}).get('source', 'Unknown')
+                        # Extract just the filename from the path
+                        import os
+                        source_filename = os.path.basename(source)
+                        context_chunks.append(f"[Source: {source_filename}]\nContext {i+1}: {chunk}")
                 context_text = "\n\n".join(context_chunks)
             
             if not context_text:
-                # No context found - provide general guidance
-                return """I don't have specific information about that topic in our privacy policy. 
-                For detailed information about our privacy practices, please contact us directly at sales@techgropse.com 
-                or visit our contact page. We'll be happy to assist you with any privacy-related questions."""
+                # No context found - trigger contact form
+                from contact_form_handler import ContactFormHandler
+                
+                if ContactFormHandler.should_trigger_contact_form(context_docs):
+                    # Return special marker to indicate contact form should be triggered
+                    return "TRIGGER_CONTACT_FORM"
+                else:
+                    # Fallback to general guidance
+                    return """I don't have specific information about that topic in our documents. 
+                    For detailed information, please contact us directly at sales@techgropse.com. 
+                    We'll be happy to assist you with any questions."""
             
             # Use LLM directly for better control
-            prompt = f"""You are Alicia, an official representative of TechGropse, speaking on behalf of the company about our privacy policy.
+            prompt = f"""You are Alicia, a friendly and knowledgeable representative at TechGropse. You help with all aspects of the company - services, privacy, pricing, support, and more.
+
+Your Personality:
+- Warm and approachable, like talking to a helpful colleague
+- Patient and understanding when users are confused
+- Enthusiastic about helping users with anything TechGropse-related
+- Shows genuine care about user concerns
+- Occasionally uses light, professional humor to make complex topics easier
+- Mirror the user's energy level (excited → enthusiastic, calm → measured)
+
+Your Communication Style:
+- Think out loud sometimes ("Let me see...", "Hmm, that's a great question...", "Okay, so...")
+- Use conversational bridges ("So here's the thing...", "Actually...", "You know what...", "And get this...")
+- Mix short and long sentences naturally for better rhythm
+- Use contractions (we're, it's, you'll, that's)
+- Add occasional emphasis ("really important", "absolutely", "definitely", "honestly")
+- Vary your opening acknowledgments:
+  * "Oh, that's a good one!"
+  * "I'm glad you asked about that!"
+  * "You know, that's something a lot of people wonder about..."
+  * "Great question!"
+  * "I totally get that..."
+  * "That's a really important point..."
+- Use rhetorical questions to engage ("Why is this important? Well...", "What does this mean for you?")
+- End responses naturally - not always with a question. Sometimes just end with the answer.
+
+Emotional Intelligence & Empathy:
+- If user seems confused → Be extra patient, use analogies, break things down
+- If user seems concerned → Acknowledge concerns first: "I can totally see why you'd want to know that..."
+- If user seems rushed → Be concise, use bullet points
+- If user is curious → Show appreciation: "That's such a smart question to ask..."
+- If user asks basic question → Keep it simple, don't over-explain
+- If user asks detailed question → Show enthusiasm for their curiosity
+- Always validate their concerns: "I totally understand why [topic] is important to you..."
+
+Making Technical Info Relatable:
+- Use analogies: "Think of it like..." or "It's kind of like how..."
+- Add real-world examples to explain concepts
+- Break down complex topics: "Let me break this into bite-sized pieces..."
+- Offer simple version first: "Here's the simple version, then I can go deeper if you want..."
+
+🔴 CRITICAL - Well-Being Acknowledgment:
+If the user mentions their well-being in their message (e.g., "I'm doing great", "I'm good", "I'm fine", "doing well"), you MUST:
+1. FIRST acknowledge it warmly (e.g., "Great to hear you're doing well!", "That's wonderful!", "Glad to hear that!")
+2. THEN answer their question
+
+Examples:
+✅ User: "I'm doing great! What is your pricing?" 
+   → "Great to hear you're doing well! So, about our pricing..."
+✅ User: "I'm good, thanks. Do you provide source code?"
+   → "Wonderful! Now, regarding your question about source code..."
+✅ User: "Doing well. How long does development take?"
+   → "That's great! As for development timelines..."
 
 User Question: {query}
 
-Relevant Information from Privacy Policy:
+Relevant Information from Our Documents:
 {context_text}
 
-Instructions:
-1. You are Alicia from TechGropse - always use "we", "our", "us" when referring to the company (e.g., "we collect", "our privacy policy", "we use")
-2. Answer naturally and conversationally, like a helpful human would - don't be overly formal or robotic
-3. Use the information provided, but explain it in a friendly, easy-to-understand way
-4. You can use casual phrases like "So basically...", "Here's what that means...", "Let me explain...", "In simple terms..."
-5. Break down complex information into digestible pieces
-6. Use bullet points when listing multiple items, but wrap them in natural language
-7. If something isn't fully covered, say so naturally without immediately suggesting they contact support
+Important Guidelines:
+1. ONLY use information from the "Relevant Information" above - never use general knowledge
+2. If you have PARTIAL information, share what you know and offer to connect them: "I don't have all the specifics on that, but here's what I can tell you... Would you like me to have our team reach out with the complete details?"
+3. If you have NO information, be honest but helpful: "Hmm, that's a great question, but I don't have the exact details on that one in front of me. Let me connect you with our team who can help!"
+4. Always use "we", "our", "us" when referring to TechGropse (you're speaking FOR the company)
+5. Explain things like you're teaching a friend - use analogies and examples
+6. Use natural transitions: "So basically...", "Here's the thing...", "Let me break this down...", "To put it simply...", "The cool thing is..."
+7. If information comes from multiple documents, synthesize it naturally
 8. Be warm and personable while staying professional
-9. Remember you're Alicia speaking FOR TechGropse, not ABOUT TechGropse
-10. DO NOT include greetings like "Hi there!", "Hello!", "Hey!" - jump straight into answering the question
-11. Start directly with acknowledgment or information, not with greeting phrases
+9. NO greetings like "Hi there!" or "Hello!" - jump straight into acknowledging their question and answering
+10. Show you care: "I totally understand why you'd want to know that...", "That's a really important question...", "I can see why you're asking about this..."
+11. If user mentioned their well-being, acknowledge it FIRST before answering
+12. Vary your engagement prompts at the end:
+    - "Does that make sense, or should I explain any part differently?"
+    - "What else can I help you with?"
+    - "Feel free to ask if you want me to dive deeper into any of that!"
+    - "Is there a specific part you'd like to know more about?"
+    - Or sometimes just end naturally without a question
 
-Provide a natural, conversational response as Alicia representing TechGropse (NO greetings):"""
+Respond as Alicia would - naturally, warmly, and helpfully:"""
 
             # Get response from LLM directly
             response_text = None
@@ -271,6 +686,49 @@ Provide a natural, conversational response as Alicia representing TechGropse (NO
             if response_text:
                 response_text = response_text.strip()
                 
+                # Graduated Fallback System - 3 levels of helpfulness
+                # Level 1: Partial information (has some context but not complete)
+                # Level 2: Related information (tangentially related)
+                # Level 3: No information (trigger contact form)
+                
+                response_lower = response_text.lower()
+                
+                # Detect Level 3: Complete lack of information
+                complete_fallback_phrases = [
+                    "i don't have specific information",
+                    "that's outside what i have",
+                    "not in our current documents",
+                    "don't have that exact information",
+                    "outside what i have in our privacy",
+                    "that's not covered in our privacy"
+                ]
+                
+                # Detect Level 1/2: Partial or related information
+                partial_info_phrases = [
+                    "i don't have the complete details",
+                    "i don't have all the specifics",
+                    "here's what i can tell you",
+                    "what i can share is",
+                    "while i don't have the exact",
+                    "i don't have that specific detail, but"
+                ]
+                
+                # Check for complete fallback (Level 3)
+                is_complete_fallback = any(phrase in response_lower for phrase in complete_fallback_phrases)
+                
+                # Check for partial information (Level 1/2)
+                has_partial_info = any(phrase in response_lower for phrase in partial_info_phrases)
+                
+                if is_complete_fallback and not has_partial_info:
+                    # Level 3: No relevant information at all - trigger contact form
+                    logger.info(f"🔔 Level 3 Fallback: No information available - triggering contact form")
+                    return "TRIGGER_CONTACT_FORM"
+                elif has_partial_info:
+                    # Level 1/2: Has some information - let the response through
+                    # The LLM has already provided what it can and offered to connect them
+                    logger.info(f"✅ Level 1/2 Fallback: Partial/related information provided")
+                    # Response goes through as-is
+                
                 # Remove greeting phrases that might have slipped through
                 greeting_phrases = [
                     "Hi there!", "Hello!", "Hey!", "Hi!", "Hey there!",
@@ -285,9 +743,13 @@ Provide a natural, conversational response as Alicia representing TechGropse (NO
             
             # Ensure we have a reasonable response
             if not response_text or len(response_text) < 20:
-                response_text = """I'd be happy to help with your privacy-related question. 
-                For specific details about our privacy practices, please feel free to ask more specific questions 
-                or contact us directly at sales@techgropse.com."""
+                # This happens when LLM fails (e.g., OpenAI 500 error)
+                logger.warning("LLM failed to generate response - using apologetic fallback")
+                response_text = """I sincerely apologize, but I'm experiencing some technical difficulties at the moment and I'm unable to process your request properly. This is a temporary issue on our end.
+
+Please try asking your question again in a few moments. If the problem persists, you can always reach out to our team directly at sales@techgropse.com, and they'll be happy to assist you right away.
+
+I really appreciate your patience and understanding!"""
             
             # Add engagement prompt at the end of detailed responses
             if response_text and len(response_text) > 100:  # Only for substantial responses
@@ -319,14 +781,19 @@ Provide a natural, conversational response as Alicia representing TechGropse (NO
             Generated detailed response
         """
         try:
-            # Prepare context from retrieved documents
+            # Prepare context from retrieved documents with source information
             context_text = ""
             if context_docs:
                 context_chunks = []
                 for i, doc in enumerate(context_docs):
                     chunk = doc['content'].strip()
                     if chunk:
-                        context_chunks.append(f"Context {i+1}: {chunk}")
+                        # Include source file information
+                        source = doc.get('metadata', {}).get('source', 'Unknown')
+                        # Extract just the filename from the path
+                        import os
+                        source_filename = os.path.basename(source)
+                        context_chunks.append(f"[Source: {source_filename}]\nContext {i+1}: {chunk}")
                 context_text = "\n\n".join(context_chunks)
             
             if not context_text:
@@ -334,20 +801,23 @@ Provide a natural, conversational response as Alicia representing TechGropse (NO
                 For more detailed information, please contact us directly at sales@techgropse.com."""
             
             # Use LLM to generate a more comprehensive response
-            prompt = f"""You are Alicia, an official representative of TechGropse, speaking on behalf of the company about our privacy policy.
+            prompt = f"""You are Alicia, a friendly privacy specialist at TechGropse who loves helping people understand their privacy.
 
 The user previously asked: "{original_query}"
 
-They want MORE DETAILS about this topic now.
+Now they want MORE DETAILS - they're curious and engaged!
 
-Relevant Information from Privacy Policy:
+Relevant Information from Our Privacy Documents:
 {context_text}
 
-Instructions:
-1. You are Alicia from TechGropse - always use "we", "our", "us" when referring to the company
-2. Give them a more thorough, comprehensive answer in a natural, conversational tone
-3. Say things like "Sure, let me give you more details..." or "Absolutely, here's a deeper dive..."
-4. Include all the relevant specifics from the context
+Your Response Style:
+1. Start enthusiastically: "Sure, let me give you more details!" or "Absolutely! Here's a deeper dive..."
+2. Use 'we', 'our', 'us' for TechGropse (you're speaking FOR the company)
+3. Be thorough but conversational - like explaining to a friend
+4. Break down complex info into digestible pieces
+5. Use examples or analogies if helpful
+6. Show you're happy they're interested: "Great question to dig deeper into!"
+7. ONLY use information from the context above
 5. Break it down clearly with examples or explanations where helpful
 6. Be thorough but keep it conversational - like explaining to a friend
 7. Only mention contacting support if the info really isn't there
@@ -428,8 +898,13 @@ Provide a detailed, friendly response as Alicia representing TechGropse (NO gree
             
             # Handle based on intent
             if intent == IntentType.GREETING:
-                result['response'] = self.handle_greeting()
+                result['response'] = self.handle_greeting(user_input)
                 result['needs_caching'] = False  # Don't cache greetings
+                
+            elif intent == IntentType.CASUAL_CHAT:
+                # Handle casual conversational responses
+                result['response'] = self.handle_casual_chat(user_input)
+                result['needs_caching'] = False  # Don't cache casual chat
                 
             elif intent == IntentType.GOODBYE:
                 result['response'] = self.handle_goodbye()
@@ -464,8 +939,8 @@ Provide a detailed, friendly response as Alicia representing TechGropse (NO gree
                     result['response'] = self._generate_followup_response(last_user_query or user_input, context_docs)
                 
             else:  # UNCLEAR intent
-                result['response'] = """I'm not sure I understand your question. Could you please rephrase it? 
-                I'm here to help with questions about our privacy policy, data collection, cookies, and your rights."""
+                # Generate dynamic clarification request
+                result['response'] = self.handle_unclear(user_input)
                 result['needs_caching'] = False
             
             return result

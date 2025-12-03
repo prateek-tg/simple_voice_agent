@@ -19,7 +19,7 @@ def main():
         # Import and run the socket server
         from socket_server import main as start_server
         
-        print("🚀 Starting Privacy Policy Chatbot Socket.IO Server...")
+        print("🚀 Starting TechGropse Virtual Representative Socket.IO Server...")
         print("🔌 Socket.IO endpoint: http://51.38.38.66:5000")
         print("📡 Protocol: Socket.IO with WebSocket transport")
         print("Press Ctrl+C to stop the server\n")

@@ -118,72 +118,79 @@ class SessionManager:
             logger.error(f"Failed to update session activity: {e}")
             return False
     
-    def cache_query_response(self, session_id: str, query: str, response: str) -> bool:
-        """
-        Cache a query-response pair for the session.
-        
-        Args:
-            session_id: Session identifier
-            query: User query
-            response: Bot response
-            
-        Returns:
-            True if cached successfully, False otherwise
-        """
-        try:
-            # Normalize query for consistent caching
-            normalized_query = self._normalize_query_for_cache(query)
-            cache_key = f"cache:{session_id}:{hash(normalized_query)}"
-            
-            cache_data = {
-                "original_query": query,
-                "normalized_query": normalized_query,
-                "response": response,
-                "timestamp": datetime.now().isoformat()
-            }
-            
-            # Cache with session timeout
-            self.redis_client.setex(
-                cache_key,
-                config.session_timeout,
-                json.dumps(cache_data)
-            )
-            
-            logger.debug(f"Cached query-response for session {session_id}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to cache query-response: {e}")
-            return False
+    # ==================================================================================
+    # DEPRECATED: Redis caching methods - replaced by OpenAI's store parameter
+    # OpenAI now handles conversation storage with store=True in model_kwargs
+    # Keeping these methods commented for potential rollback
+    # ==================================================================================
     
-    def get_cached_response(self, session_id: str, query: str) -> Optional[str]:
-        """
-        Retrieve a cached response for a query in the session.
-        Uses semantic similarity to find similar cached queries.
-        
-        Args:
-            session_id: Session identifier
-            query: User query
-            
-        Returns:
-            Cached response if found, None otherwise
-        """
-        try:
-            # First try exact match
-            normalized_query = self._normalize_query_for_cache(query)
-            cache_key = f"cache:{session_id}:{hash(normalized_query)}"
-            
-            cached_data_str = self.redis_client.get(cache_key)
-            if cached_data_str:
-                cached_data = json.loads(cached_data_str)
-                logger.debug(f"Found exact cached response for session {session_id}")
-                return cached_data["response"]
-            
-            # If no exact match, try semantic similarity
-            return self._find_similar_cached_response(session_id, normalized_query)
-            
-        except Exception as e:
-            logger.error(f"Failed to retrieve cached response: {e}")
-            return None
+    # def cache_query_response(self, session_id: str, query: str, response: str) -> bool:
+    #     """
+    #     Cache a query-response pair for the session.
+    #     
+    #     Args:
+    #         session_id: Session identifier
+    #         query: User query
+    #         response: Bot response
+    #         
+    #     Returns:
+    #         True if cached successfully, False otherwise
+    #     """
+    #     try:
+    #         # Normalize query for consistent caching
+    #         normalized_query = self._normalize_query_for_cache(query)
+    #         cache_key = f"cache:{session_id}:{hash(normalized_query)}"
+    #         
+    #         cache_data = {
+    #             "original_query": query,
+    #             "normalized_query": normalized_query,
+    #             "response": response,
+    #             "timestamp": datetime.now().isoformat()
+    #         }
+    #         
+    #         # Cache with session timeout
+    #         self.redis_client.setex(
+    #             cache_key,
+    #             config.session_timeout,
+    #             json.dumps(cache_data)
+    #         )
+    #         
+    #         logger.debug(f"Cached query-response for session {session_id}")
+    #         return True
+    #     except Exception as e:
+    #         logger.error(f"Failed to cache query-response: {e}")
+    #         return False
+    # 
+    # def get_cached_response(self, session_id: str, query: str) -> Optional[str]:
+    #     """
+    #     Retrieve a cached response for a query in the session.
+    #     Uses semantic similarity to find similar cached queries.
+    #     
+    #     Args:
+    #         session_id: Session identifier
+    #         query: User query
+    #         
+    #     Returns:
+    #         Cached response if found, None otherwise
+    #     """
+    #     try:
+    #         # First try exact match
+    #         normalized_query = self._normalize_query_for_cache(query)
+    #         cache_key = f"cache:{session_id}:{hash(normalized_query)}"
+    #         
+    #         cached_data_str = self.redis_client.get(cache_key)
+    #         if cached_data_str:
+    #             cached_data = json.loads(cached_data_str)
+    #             logger.debug(f"Found exact cached response for session {session_id}")
+    #             return cached_data["response"]
+    #         
+    #         # If no exact match, try semantic similarity
+    #         return self._find_similar_cached_response(session_id, normalized_query)
+    #         
+    #     except Exception as e:
+    #         logger.error(f"Failed to retrieve cached response: {e}")
+    #         return None
+
 
     # Conversation history helpers
     def append_message_to_history(self, session_id: str, role: str, message: str) -> bool:
@@ -446,6 +453,99 @@ Respond with only the NUMBER (1, 2, 3, etc.) or NONE:"""
         except Exception as e:
             logger.error(f"Error finding similar query index: {e}")
             return None
+    
+    def get_contact_form_state(self, session_id: str) -> str:
+        """
+        Get the current contact form state for a session.
+        
+        Args:
+            session_id: Session identifier
+            
+        Returns:
+            Contact form state (default: 'idle')
+        """
+        try:
+            state_key = f"session:{session_id}:contact_form_state"
+            state = self.redis_client.get(state_key)
+            return state if state else "idle"
+        except Exception as e:
+            logger.error(f"Failed to get contact form state: {e}")
+            return "idle"
+
+    def set_contact_form_state(self, session_id: str, state: str) -> bool:
+        """
+        Set the contact form state for a session.
+        
+        Args:
+            session_id: Session identifier
+            state: New contact form state
+            
+        Returns:
+            True if set successfully, False otherwise
+        """
+        try:
+            state_key = f"session:{session_id}:contact_form_state"
+            self.redis_client.setex(state_key, config.session_timeout, state)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to set contact form state: {e}")
+            return False
+
+    def get_contact_form_data(self, session_id: str) -> dict:
+        """
+        Get the partially collected contact form data for a session.
+        
+        Args:
+            session_id: Session identifier
+            
+        Returns:
+            Contact form data dictionary
+        """
+        try:
+            data_key = f"session:{session_id}:contact_form_data"
+            data_str = self.redis_client.get(data_key)
+            return json.loads(data_str) if data_str else {}
+        except Exception as e:
+            logger.error(f"Failed to get contact form data: {e}")
+            return {}
+
+    def set_contact_form_data(self, session_id: str, data: dict) -> bool:
+        """
+        Set the contact form data for a session.
+        
+        Args:
+            session_id: Session identifier
+            data: Contact form data dictionary
+            
+        Returns:
+            True if set successfully, False otherwise
+        """
+        try:
+            data_key = f"session:{session_id}:contact_form_data"
+            self.redis_client.setex(data_key, config.session_timeout, json.dumps(data))
+            return True
+        except Exception as e:
+            logger.error(f"Failed to set contact form data: {e}")
+            return False
+
+    def clear_contact_form(self, session_id: str) -> bool:
+        """
+        Clear contact form state and data for a session.
+        
+        Args:
+            session_id: Session identifier
+            
+        Returns:
+            True if cleared successfully, False otherwise
+        """
+        try:
+            state_key = f"session:{session_id}:contact_form_state"
+            data_key = f"session:{session_id}:contact_form_data"
+            self.redis_client.delete(state_key, data_key)
+            return True
+        except Exception as e:
+            logger.error(f"Failed to clear contact form: {e}")
+            return False
     
     def close(self):
         """Close the Redis connection."""

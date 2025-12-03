@@ -5,10 +5,11 @@ import logging
 import sys
 from typing import Optional, Dict, Any
 
-from agent import ChatbotAgent
+from agent import ChatbotAgent, ContactFormState
 from session_manager import SessionManager, session_manager
 from vectorstore.chromadb_client import ChromaDBClient
 from config import config
+from contact_form_handler import ContactFormHandler
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +29,9 @@ class ChatBot:
             if self.chromadb_client.is_collection_empty():
                 logger.warning("ChromaDB collection is empty. Please run data initialization first.")
                 print("\n⚠️  Warning: No data found in ChromaDB. Please run 'python initialise_data.py' first.")
-                
-            self.session_id: Optional[str] = None
+            
+            # Note: session_id is NOT stored as instance variable to prevent
+            # session mixing in concurrent requests. It must be passed as parameter.
             
             logger.info("ChatBot initialized successfully")
             
@@ -39,134 +41,144 @@ class ChatBot:
     
     def start_session(self) -> str:
         """
-        Start a new chat session.
+        Start a new chat session and return the session ID.
+        
+        IMPORTANT: Session ID is NOT stored as instance variable.
+        Caller must store and pass it to other methods.
         
         Returns:
-            Session ID
+            Session ID (UUID string)
         """
         try:
-            self.session_id = self.session_manager.create_session()
-            logger.info(f"Started new session: {self.session_id}")
+            session_id = self.session_manager.create_session()
+            logger.info(f"Started new session: {session_id}")
             
-            # Display welcome message
-            welcome_message = """
-🤖 Privacy Policy Assistant
-
-Hello! I'm here to help you understand TechGropse's privacy policy and answer any questions about how we handle your personal data.
-
-You can ask me about:
-- Data collection practices
-- Cookie usage
-- Your privacy rights
-- Contact information
-- Security measures
-
-Type 'quit', 'exit', or 'bye' to end our conversation.
-            """
-            
-            print(welcome_message)
-            return self.session_id
+            # No welcome message - wait for user to send first message
+            return session_id
             
         except Exception as e:
             logger.error(f"Failed to start session: {e}")
             raise
     
-    def end_session(self):
-        """End the current session and clear cache."""
+    def end_session(self, session_id: str):
+        """
+        End the session and clear cache.
+        
+        Args:
+            session_id: Session ID to end
+        """
         try:
-            if self.session_id:
-                self.session_manager.clear_session(self.session_id)
-                logger.info(f"Ended session: {self.session_id}")
-                print("\n👋 Session ended. Thank you for using our privacy assistant!")
-                self.session_id = None
+            if session_id:
+                self.session_manager.clear_session(session_id)
+                logger.info(f"Ended session: {session_id}")
+                print("\n👋 Session ended. Thank you for using TechGropse Virtual Representative!")
+
             
         except Exception as e:
             logger.error(f"Error ending session: {e}")
     
-    def process_message(self, user_input: str) -> str:
+    def process_message(self, user_input: str, session_id: str) -> str:
         """
         Process a user message through the complete flow.
         
         Args:
             user_input: User's input message
+            session_id: Session ID for this request
             
         Returns:
             Bot response
         """
         try:
-            if not self.session_id:
-                raise ValueError("No active session. Please start a session first.")
+            if not session_id:
+                raise ValueError("session_id is required")
 
             # Update session activity
-            self.session_manager.update_session_activity(self.session_id)
+            self.session_manager.update_session_activity(session_id)
 
             # Append user message to session history
             try:
-                self.session_manager.append_message_to_history(self.session_id, 'user', user_input)
+                self.session_manager.append_message_to_history(session_id, 'user', user_input)
             except Exception:
                 logger.debug("Unable to append message to history")
 
-            # Step 1: Check cache first
-            cached_response = self.session_manager.get_cached_response(self.session_id, user_input)
-
-            if cached_response:
-                # Dynamic acknowledgment referencing the previous topic
-                try:
-                    last_query = self.session_manager.get_last_user_query(self.session_id)
-                except Exception:
-                    last_query = None
-
-                def make_ack(prev_q: Optional[str]) -> str:
-                    import random
-                    templates = [
-                        "As I mentioned earlier,: ",
-                        "To reiterate about, ",
-                        "As we discussed before regarding, ",
-                        "Following up on your earlier question about, "
-                    ]
-                    t = random.choice(templates)
-                    if prev_q:
-                        preview = prev_q.strip()
-                        if len(preview) > 60:
-                            preview = preview[:57] + '...'
-                        return t.format(topic=preview)
-                    return random.choice(["As I mentioned earlier, ", "As we discussed before, "])
-
-                prefix = make_ack(last_query)
-                final_cached = f"{prefix}{cached_response}"
-
+            # Check if we're in contact form flow
+            form_state = self.session_manager.get_contact_form_state(session_id)
+            
+            if form_state != ContactFormState.IDLE.value:
+                # Handle contact form step
+                form_data = self.session_manager.get_contact_form_data(session_id)
+                
+                result = ContactFormHandler.handle_contact_form_step(
+                    form_state=form_state,
+                    user_input=user_input,
+                    form_data=form_data,
+                    session_id=session_id,
+                    mongodb_client=self.agent.mongodb_client
+                )
+                
+                # Update session state
+                self.session_manager.set_contact_form_state(session_id, result['next_state'])
+                self.session_manager.set_contact_form_data(session_id, result['form_data'])
+                
+                response = result['response']
+                
                 # Append bot response to history
                 try:
-                    self.session_manager.append_message_to_history(self.session_id, 'bot', final_cached)
+                    self.session_manager.append_message_to_history(session_id, 'bot', response)
                 except Exception:
-                    logger.debug("Unable to append cached bot response to history")
+                    logger.debug("Unable to append bot response to history")
+                
+                logger.info(f"Session {session_id}: ContactForm={form_state}")
+                return response
 
-                logger.debug("Returning cached response with dynamic acknowledgment")
-                return final_cached
-
-            # Step 2: Process through agent (provide last user query for follow-ups)
+            # Process through agent (provide last user query for follow-ups)
             # Since we already appended current user_input to history, we need to skip it
             # to get the PREVIOUS question (skip_current=True)
-            last_user = self.session_manager.get_last_user_query(self.session_id, skip_current=True)
+            last_user = self.session_manager.get_last_user_query(session_id, skip_current=True)
             result = self.agent.process_user_input(user_input, last_user_query=last_user)
 
             response = result.get('response', '')
             intent = result.get('intent', '')
-            needs_caching = result.get('needs_caching', True)
 
-            # Step 3: Cache response if needed
-            if needs_caching and intent == 'query' and len(response) > 50:
-                # Only cache substantial query responses
-                self.session_manager.cache_query_response(self.session_id, user_input, response)
+            # Check if user explicitly requested contact (new intent type)
+            if intent == 'contact_request':
+                # User explicitly asked to be contacted - skip consent, go straight to name collection
+                form_data = {'original_query': user_input}
+                self.session_manager.set_contact_form_data(session_id, form_data)
+                
+                # Skip consent step and go directly to collecting name
+                self.session_manager.set_contact_form_state(session_id, ContactFormState.COLLECTING_NAME.value)
+                response = ContactFormHandler.ask_for_contact_consent(user_input, is_explicit_request=True)
+                
+                # Append bot response to history
+                try:
+                    self.session_manager.append_message_to_history(session_id, 'bot', response)
+                except Exception:
+                    logger.debug("Unable to append bot response to history")
+                
+                logger.info(f"Session {session_id}: Intent=contact_request, Skipped consent, collecting name")
+                return response
+
+            # Check if contact form should be triggered (fallback detection)
+            if response == "TRIGGER_CONTACT_FORM":
+                # Store original query in form data
+                form_data = {'original_query': user_input}
+                self.session_manager.set_contact_form_data(session_id, form_data)
+                
+                # Set state to asking consent
+                self.session_manager.set_contact_form_state(session_id, ContactFormState.ASKING_CONSENT.value)
+                
+                # Generate consent message
+                response = ContactFormHandler.ask_for_contact_consent(user_input)
 
             # Append bot response to history
             try:
-                self.session_manager.append_message_to_history(self.session_id, 'bot', response)
+                self.session_manager.append_message_to_history(session_id, 'bot', response)
             except Exception:
                 logger.debug("Unable to append bot response to history")
 
             # Log interaction
-            logger.info(f"Session {self.session_id}: Intent={intent}, Cached=False")
+            logger.info(f"Session {session_id}: Intent={intent}")
 
             return response
 
@@ -174,22 +186,25 @@ Type 'quit', 'exit', or 'bye' to end our conversation.
             logger.error(f"Error processing message: {e}")
             return "I'm sorry, I encountered an error processing your request. Please try again."
     
-    def get_session_stats(self) -> Dict[str, Any]:
+    def get_session_stats(self, session_id: str) -> Dict[str, Any]:
         """
-        Get current session statistics.
+        Get session statistics.
         
+        Args:
+            session_id: Session ID to get stats for
+            
         Returns:
             Session statistics
         """
         try:
-            if not self.session_id:
-                return {"error": "No active session"}
+            if not session_id:
+                return {"error": "session_id is required"}
             
-            session_info = self.session_manager.get_session_info(self.session_id)
+            session_info = self.session_manager.get_session_info(session_id)
             collection_info = self.chromadb_client.get_collection_info()
             
             return {
-                "session_id": self.session_id,
+                "session_id": session_id,
                 "session_info": session_info,
                 "collection_info": collection_info
             }
@@ -199,18 +214,16 @@ Type 'quit', 'exit', or 'bye' to end our conversation.
             return {"error": str(e)}
     
     def run_interactive(self):
-        """
-        Run the chatbot in interactive mode.
-        """
-        # Start session and enter the interactive REPL loop.
+        """Run the chatbot in interactive CLI mode."""
         try:
-            self.start_session()
-
+            # Start session and store session_id locally
+            session_id = self.start_session()
+            
             while True:
                 try:
                     user_input = input("\n💬 You: ").strip()
-                except (KeyboardInterrupt, EOFError):
-                    print("\n\n👋 Goodbye! Thanks for using our privacy assistant.")
+                except (EOFError, KeyboardInterrupt):
+                    print("\n\n👋 Goodbye! Thanks for using TechGropse Virtual Representative.")
                     break
 
                 if not user_input:
@@ -219,7 +232,7 @@ Type 'quit', 'exit', or 'bye' to end our conversation.
 
                 # Normal processing
                 try:
-                    response = self.process_message(user_input)
+                    response = self.process_message(user_input, session_id)
                     
                     # Display response
                     print(f"\n🤖 Bot: {response}")
@@ -242,7 +255,7 @@ Type 'quit', 'exit', or 'bye' to end our conversation.
         finally:
             # Ensure session is cleared on exit
             try:
-                self.end_session()
+                self.end_session(session_id)
             except Exception:
                 pass
     
@@ -303,12 +316,10 @@ Type 'quit', 'exit', or 'bye' to end our conversation.
         return health_status
     
     def __del__(self):
-        """Cleanup when chatbot is destroyed."""
-        try:
-            if hasattr(self, 'session_id') and self.session_id:
-                self.end_session()
-        except Exception as e:
-            logger.error(f"Error in chatbot cleanup: {e}")
+        """Cleanup when object is destroyed."""
+        # Note: Session cleanup is now handled explicitly by callers
+        # since session_id is not stored as instance variable
+        pass
 
 
 if __name__ == "__main__":

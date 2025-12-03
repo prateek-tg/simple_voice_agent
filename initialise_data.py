@@ -1,6 +1,6 @@
 """
 Data initialization script for the AI Agentic RAG system.
-Loads and embeds the privacy policy data into ChromaDB for RAG functionality.
+Loads and embeds documents from multiple formats (PDF, Word, TXT, MD) into ChromaDB.
 """
 
 import logging
@@ -10,6 +10,7 @@ from typing import List, Dict, Any
 
 from vectorstore.chromadb_client import ChromaDBClient
 from config import get_config
+from document_loader import document_loader
 
 # Configure logging
 logging.basicConfig(
@@ -20,28 +21,31 @@ logger = logging.getLogger(__name__)
 
 def load_privacy_policy_data(data_file_path: str) -> str:
     """
-    Load the privacy policy text from the data file.
+    Load document data from any supported format (PDF, Word, TXT, MD).
     
     Args:
-        data_file_path: Path to the privacy policy text file
+        data_file_path: Path to the document file
         
     Returns:
-        Privacy policy content as string
+        Document content as string
     """
     try:
-        with open(data_file_path, 'r', encoding='utf-8') as file:
-            content = file.read()
+        # Use document loader to handle multiple formats
+        content = document_loader.load_document(data_file_path)
         
-        logger.info(f"Loaded privacy policy data from {data_file_path}")
+        logger.info(f"Loaded document from {data_file_path}")
         logger.info(f"Content length: {len(content)} characters")
         
         return content
         
     except FileNotFoundError:
-        logger.error(f"Privacy policy file not found: {data_file_path}")
+        logger.error(f"Document file not found: {data_file_path}")
+        raise
+    except ValueError as e:
+        logger.error(f"Unsupported file format: {e}")
         raise
     except Exception as e:
-        logger.error(f"Error loading privacy policy data: {e}")
+        logger.error(f"Error loading document: {e}")
         raise
 
 def create_document_metadata(source_file: str) -> Dict[str, Any]:
@@ -167,6 +171,79 @@ def verify_embeddings(chromadb_client: ChromaDBClient) -> bool:
         logger.error(f"Error during verification: {e}")
         return False
 
+def add_documents_incremental(data_file_paths: List[str], category: str = "policy") -> bool:
+    """
+    Add new documents to existing ChromaDB collection WITHOUT resetting.
+    
+    Args:
+        data_file_paths: List of paths to data files to add
+        category: Category for the documents (e.g., "privacy", "terms", "cookies")
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        logger.info("Adding documents incrementally to existing collection...")
+        
+        # Initialize ChromaDB client
+        chromadb_client = ChromaDBClient()
+        
+        # Get current collection info
+        collection_info = chromadb_client.get_collection_info()
+        initial_count = collection_info.get("count", 0)
+        logger.info(f"Current collection contains {initial_count} documents")
+        
+        total_added = 0
+        
+        for data_file_path in data_file_paths:
+            # Ensure data file exists
+            if not os.path.exists(data_file_path):
+                logger.error(f"Data file not found: {data_file_path}")
+                continue
+            
+            logger.info(f"Processing file: {data_file_path}")
+            
+            # Load document data
+            content = load_privacy_policy_data(data_file_path)
+            
+            # Create enhanced metadata with category
+            from datetime import datetime
+            metadata = {
+                "source": data_file_path,
+                "document_type": "policy",
+                "category": category,
+                "company": "TechGropse",
+                "version": "1.0",
+                "language": "english",
+                "last_updated": datetime.now().isoformat(),
+                "domain": "privacy_and_data_protection"
+            }
+            
+            # Process and embed documents (adds to existing collection)
+            success = process_and_embed_documents(chromadb_client, content, metadata)
+            
+            if success:
+                # Count how many chunks were added
+                chunks = chromadb_client.load_and_chunk_document_from_text(content, metadata)
+                total_added += len(chunks)
+                logger.info(f"✓ Added {len(chunks)} chunks from {data_file_path}")
+            else:
+                logger.error(f"✗ Failed to add documents from {data_file_path}")
+        
+        # Get final collection info
+        final_info = chromadb_client.get_collection_info()
+        final_count = final_info.get("count", 0)
+        
+        logger.info(f"Collection updated: {initial_count} → {final_count} documents")
+        logger.info(f"✓ Successfully added {total_added} new document chunks")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error adding documents incrementally: {e}")
+        return False
+
+
 def initialize_chromadb_data(data_file_path: str = None, reset_collection: bool = False) -> bool:
     """
     Main function to initialize ChromaDB with privacy policy data.
@@ -221,8 +298,18 @@ def initialize_chromadb_data(data_file_path: str = None, reset_collection: bool 
         logger.info("Loading privacy policy data...")
         content = load_privacy_policy_data(data_file_path)
         
-        # Create metadata
-        metadata = create_document_metadata(data_file_path)
+        # Create enhanced metadata
+        from datetime import datetime
+        metadata = {
+            "source": data_file_path,
+            "document_type": "policy",
+            "category": "privacy",  # Default category
+            "company": "TechGropse",
+            "version": "1.0",
+            "language": "english",
+            "last_updated": datetime.now().isoformat(),
+            "domain": "privacy_and_data_protection"
+        }
         
         # Process and embed documents
         success = process_and_embed_documents(chromadb_client, content, metadata)
@@ -256,27 +343,49 @@ def main():
     """
     import argparse
     
-    parser = argparse.ArgumentParser(description="Initialize ChromaDB with privacy policy data")
-    parser.add_argument("--data-file", default="data/info.txt", help="Path to privacy policy data file")
-    parser.add_argument("--reset", action="store_true", help="Reset existing collection")
+    parser = argparse.ArgumentParser(description="Initialize or update ChromaDB with document data")
+    parser.add_argument("--data-file", default="data/info.txt", help="Path to data file (for init mode)")
+    parser.add_argument("--reset", action="store_true", help="Reset existing collection (full reingest)")
+    parser.add_argument("--incremental", nargs="+", help="Add new files incrementally without resetting")
+    parser.add_argument("--category", default="policy", help="Category for incremental documents")
     
     args = parser.parse_args()
     
-    logger.info("Starting ChromaDB data initialization...")
+    logger.info("Starting ChromaDB data management...")
     
-    success = initialize_chromadb_data(
-        data_file_path=args.data_file,
-        reset_collection=args.reset
-    )
+    # Incremental mode: Add new files without resetting
+    if args.incremental:
+        logger.info(f"Running in INCREMENTAL mode - adding {len(args.incremental)} file(s)")
+        success = add_documents_incremental(
+            data_file_paths=args.incremental,
+            category=args.category
+        )
+        
+        if success:
+            logger.info("✓ Documents added successfully!")
+            print(f"\n✓ Added {len(args.incremental)} file(s) to existing collection")
+            print("✓ You can now run the main RAG system with: python main.py")
+        else:
+            logger.error("Failed to add documents!")
+            print("\n✗ Failed to add documents. Please check the logs for errors.")
+            exit(1)
     
-    if success:
-        logger.info("Data initialization completed successfully!")
-        print("\n✓ ChromaDB has been initialized with privacy policy data")
-        print("✓ You can now run the main RAG system with: python main.py")
+    # Full initialization mode
     else:
-        logger.error("Data initialization failed!")
-        print("\n✗ Data initialization failed. Please check the logs for errors.")
-        exit(1)
+        logger.info("Running in INITIALIZATION mode")
+        success = initialize_chromadb_data(
+            data_file_path=args.data_file,
+            reset_collection=args.reset
+        )
+        
+        if success:
+            logger.info("Data initialization completed successfully!")
+            print("\n✓ ChromaDB has been initialized with privacy policy data")
+            print("✓ You can now run the main RAG system with: python main.py")
+        else:
+            logger.error("Data initialization failed!")
+            print("\n✗ Data initialization failed. Please check the logs for errors.")
+            exit(1)
 
 if __name__ == "__main__":
     main()

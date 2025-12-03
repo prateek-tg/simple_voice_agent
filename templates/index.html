@@ -1,9 +1,10 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Privacy Policy Chatbot</title>
+    <title>TechGropse Virtual Representative</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.js"></script>
     <style>
         * {
@@ -27,7 +28,7 @@
             height: 90vh;
             background: white;
             border-radius: 15px;
-            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
             display: flex;
             flex-direction: column;
             overflow: hidden;
@@ -62,9 +63,17 @@
         }
 
         @keyframes pulse {
-            0% { opacity: 1; }
-            50% { opacity: 0.5; }
-            100% { opacity: 1; }
+            0% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.5;
+            }
+
+            100% {
+                opacity: 1;
+            }
         }
 
         .chat-messages {
@@ -86,8 +95,15 @@
         }
 
         @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(10px); }
-            to { opacity: 1; transform: translateY(0); }
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
         }
 
         .message.user {
@@ -164,13 +180,29 @@
             animation: bounce 1.4s infinite ease-in-out both;
         }
 
-        .typing-dots span:nth-child(1) { animation-delay: -0.32s; }
-        .typing-dots span:nth-child(2) { animation-delay: -0.16s; }
-        .typing-dots span:nth-child(3) { animation-delay: 0s; }
+        .typing-dots span:nth-child(1) {
+            animation-delay: -0.32s;
+        }
+
+        .typing-dots span:nth-child(2) {
+            animation-delay: -0.16s;
+        }
+
+        .typing-dots span:nth-child(3) {
+            animation-delay: 0s;
+        }
 
         @keyframes bounce {
-            0%, 80%, 100% { transform: scale(0); }
-            40% { transform: scale(1); }
+
+            0%,
+            80%,
+            100% {
+                transform: scale(0);
+            }
+
+            40% {
+                transform: scale(1);
+            }
         }
 
         .chat-input-container {
@@ -294,13 +326,14 @@
         }
     </style>
 </head>
+
 <body>
     <div class="chat-container">
         <div class="chat-header">
-            <h1>🤖 Privacy Policy Assistant</h1>
+            <h1>🤖 TechGropse Virtual Representative</h1>
             <p>Ask me about TechGropse's privacy policy <span class="status-indicator" id="connectionStatus"></span></p>
         </div>
-        
+
         <div class="chat-messages" id="chatMessages">
             <div class="welcome-message">
                 <p>👋 Welcome! I'm here to help you understand TechGropse's privacy policy.</p>
@@ -315,14 +348,11 @@
                 <span></span>
             </div>
         </div>
-        
+
         <div class="chat-input-container">
             <div class="chat-input">
-                <textarea 
-                    id="messageInput" 
-                    placeholder="Type your question about privacy policy..."
-                    rows="1"
-                ></textarea>
+                <textarea id="messageInput" placeholder="Type your question about privacy policy..."
+                    rows="1"></textarea>
                 <button id="sendButton" class="send-button">
                     ➤
                 </button>
@@ -333,7 +363,7 @@
     <script>
         // Initialize Socket.IO connection
         const socket = io();
-        
+
         // DOM elements
         const chatMessages = document.getElementById('chatMessages');
         const messageInput = document.getElementById('messageInput');
@@ -342,7 +372,7 @@
         const connectionStatus = document.getElementById('connectionStatus');
 
         // Auto-resize textarea
-        messageInput.addEventListener('input', function() {
+        messageInput.addEventListener('input', function () {
             this.style.height = 'auto';
             this.style.height = this.scrollHeight + 'px';
         });
@@ -354,23 +384,23 @@
 
             // Add user message to chat
             addMessage(message, 'user');
-            
+
             // Emit query to server
             socket.emit('user_query', { message: message });
-            
+
             // Clear input and disable send button
             messageInput.value = '';
             messageInput.style.height = 'auto';
             sendButton.disabled = true;
-            
+
             // Show typing indicator
             showTypingIndicator();
         }
 
         // Event listeners
         sendButton.addEventListener('click', sendMessage);
-        
-        messageInput.addEventListener('keypress', function(e) {
+
+        messageInput.addEventListener('keypress', function (e) {
             if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 sendMessage();
@@ -378,29 +408,29 @@
         });
 
         // Socket event handlers
-        socket.on('connect', function() {
+        socket.on('connect', function () {
             console.log('Connected to server');
             connectionStatus.style.background = '#4ade80';
-            addMessage('Connected to Privacy Policy Assistant', 'system');
+            addMessage('Connected to TechGropse Virtual Representative', 'system');
         });
 
-        socket.on('disconnect', function() {
+        socket.on('disconnect', function () {
             console.log('Disconnected from server');
             connectionStatus.style.background = '#ef4444';
             addMessage('Disconnected from server', 'system');
         });
 
-        socket.on('query_received', function(data) {
+        socket.on('query_received', function (data) {
             console.log('Query received:', data);
             // Query acknowledgment - could add visual feedback here
         });
 
-        socket.on('bot_response', function(data) {
+        socket.on('bot_response', function (data) {
             console.log('Bot response:', data);
             hideTypingIndicator();
             addMessage(data.message, 'bot');
             sendButton.disabled = false;
-            
+
             // If this is a goodbye response, prepare for session ending
             if (data.is_goodbye) {
                 console.log('Goodbye detected - session will end');
@@ -411,23 +441,23 @@
             }
         });
 
-        socket.on('error', function(data) {
+        socket.on('error', function (data) {
             console.error('Error:', data);
             hideTypingIndicator();
             addMessage(data.message, 'error');
             sendButton.disabled = false;
         });
 
-        socket.on('status', function(data) {
+        socket.on('status', function (data) {
             console.log('Status:', data);
             addMessage(data.message, 'system');
         });
 
-        socket.on('session_ending', function(data) {
+        socket.on('session_ending', function (data) {
             console.log('Session ending:', data);
             addMessage(data.message, 'system');
             // Show a final goodbye message
-            setTimeout(function() {
+            setTimeout(function () {
                 addMessage('👋 Goodbye! Feel free to refresh the page if you need help again.', 'system');
             }, 1000);
         });
@@ -436,7 +466,7 @@
         function addMessage(text, type) {
             const messageDiv = document.createElement('div');
             messageDiv.className = `message ${type}`;
-            
+
             const messageContent = document.createElement('div');
             // Preserve line breaks and formatting for bot messages
             if (type === 'bot') {
@@ -449,12 +479,12 @@
                 messageContent.textContent = text;
             }
             messageDiv.appendChild(messageContent);
-            
+
             const timestamp = document.createElement('div');
             timestamp.className = 'message-time';
             timestamp.textContent = formatTime(new Date());
             messageDiv.appendChild(timestamp);
-            
+
             chatMessages.appendChild(messageDiv);
             scrollToBottom();
         }
@@ -481,9 +511,10 @@
         }
 
         // Focus on input when page loads
-        window.addEventListener('load', function() {
+        window.addEventListener('load', function () {
             messageInput.focus();
         });
     </script>
 </body>
+
 </html>

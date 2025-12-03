@@ -46,6 +46,9 @@ sio.attach(app)
 # Store client sessions
 clients = {}
 
+# Track active responses for interruption handling
+active_responses = {}  # {sid: {'task': asyncio.Task, 'interrupted': bool}}
+
 
 class TextToVoiceHandler:
     """Handles text-to-voice conversion and streaming."""
@@ -121,29 +124,25 @@ async def connect(sid, environ, auth=None):
     try:
         # Create individual session for this client
         chatbot = ChatBot()
-        chatbot.start_session()
+        session_id = chatbot.start_session()  # Get session_id
         
         clients[sid] = {
-            'chatbot': chatbot
+            'chatbot': chatbot,
+            'session_id': session_id  # Store separately
         }
         
-        # Send greeting
+        # Initialize interruption tracking for this client
+        active_responses[sid] = {'task': None, 'interrupted': False}
+        
+        # Send connection status only (no greeting message)
         await sio.emit('status', {
-            'message': 'Connected to Text-to-Voice Privacy Policy Assistant',
+            'message': 'Connected',
             'type': 'success'
         }, room=sid)
         
         logger.info(f"✅ Session created for client {sid}")
         
-        # Send initial greeting with audio
-        greeting = "Hello! I'm your privacy policy assistant. How can I help you today?"
-        await sio.emit('text_response', {
-            'message': greeting,
-            'type': 'greeting'
-        }, room=sid)
-        
-        # Generate and stream greeting audio
-        await stream_audio_to_client(sid, greeting)
+        # No automatic greeting - wait for user input
         
     except Exception as e:
         error_message = str(e)
@@ -160,13 +159,19 @@ async def disconnect(sid):
     logger.info(f"🔌 Client {sid} disconnected")
     
     if sid in clients:
-        chatbot = clients[sid]['chatbot']
+        client_data = clients[sid]
+        chatbot = client_data['chatbot']
+        session_id = client_data['session_id']
         try:
-            chatbot.end_session()
+            chatbot.end_session(session_id)  # Pass session_id
         except:
             pass
         del clients[sid]
         logger.info(f"🗑️ Session cleaned up for client {sid}")
+    
+    # Clean up interruption tracking
+    if sid in active_responses:
+        del active_responses[sid]
 
 
 @sio.event
@@ -178,6 +183,25 @@ async def text_query(sid, data):
                 'message': 'Session not found'
             }, room=sid)
             return
+        
+        # INTERRUPTION HANDLING: Cancel previous response if still active
+        if sid in active_responses and active_responses[sid]['task']:
+            logger.info(f"⚠️ Interrupting previous response for client {sid}")
+            active_responses[sid]['interrupted'] = True
+            
+            # Cancel the previous task
+            previous_task = active_responses[sid]['task']
+            if previous_task and not previous_task.done():
+                previous_task.cancel()
+                try:
+                    await previous_task
+                except asyncio.CancelledError:
+                    logger.info(f"✅ Previous response cancelled for {sid}")
+            
+            # Send interruption signal to client
+            await sio.emit('response_interrupted', {
+                'message': 'Previous response interrupted'
+            }, room=sid)
         
         # Extract query text
         if isinstance(data, dict):
@@ -193,6 +217,7 @@ async def text_query(sid, data):
         
         client_data = clients[sid]
         chatbot = client_data['chatbot']
+        session_id = client_data['session_id']  # Get session_id
         
         logger.info(f"💬 Client {sid}: '{query_text}'")
         
@@ -202,37 +227,65 @@ async def text_query(sid, data):
             'status': 'processing'
         }, room=sid)
         
+        # Create a new task for this response
+        async def process_and_respond():
+            try:
+                # Reset interruption flag
+                active_responses[sid]['interrupted'] = False
+                
+                # Process query through chatbot
+                logger.info(f"🔄 Processing query for {sid}...")
+                
+                # Run in executor to avoid blocking
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(
+                    None,
+                    chatbot.process_message,
+                    query_text,
+                    session_id  # Pass session_id
+                )
+                
+                # Check if interrupted during processing
+                if active_responses[sid]['interrupted']:
+                    logger.info(f"⚠️ Response interrupted during processing for {sid}")
+                    return
+                
+                logger.info(f"✅ Client {sid} processing completed")
+                
+                # Send text response
+                await sio.emit('text_response', {
+                    'message': response,
+                    'original_query': query_text,
+                    'type': 'response'
+                }, room=sid)
+                
+                logger.info(f"📤 Sent text to client {sid}: {response[:50]}...")
+                
+                # Check again before audio streaming
+                if active_responses[sid]['interrupted']:
+                    logger.info(f"⚠️ Response interrupted before audio for {sid}")
+                    return
+                
+                # Generate and stream audio response
+                await stream_audio_to_client(sid, response)
+                
+            except asyncio.CancelledError:
+                logger.info(f"⚠️ Response task cancelled for {sid}")
+                raise
+            except Exception as e:
+                logger.error(f"Error processing query for {sid}: {e}")
+                await sio.emit('error', {
+                    'message': f'Processing error: {str(e)}'
+                }, room=sid)
+        
+        # Start the task and track it
+        task = asyncio.create_task(process_and_respond())
+        active_responses[sid]['task'] = task
+        
         try:
-            # Process query through chatbot
-            logger.info(f"🔄 Processing query for {sid}...")
-            
-            # Run in executor to avoid blocking
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                chatbot.process_message,
-                query_text
-            )
-            
-            logger.info(f"✅ Client {sid} processing completed")
-            
-            # Send text response
-            await sio.emit('text_response', {
-                'message': response,
-                'original_query': query_text,
-                'type': 'response'
-            }, room=sid)
-            
-            logger.info(f"📤 Sent text to client {sid}: {response[:50]}...")
-            
-            # Generate and stream audio response
-            await stream_audio_to_client(sid, response)
-            
-        except Exception as e:
-            logger.error(f"Error processing query for {sid}: {e}")
-            await sio.emit('error', {
-                'message': f'Processing error: {str(e)}'
-            }, room=sid)
+            await task
+        except asyncio.CancelledError:
+            pass  # Task was cancelled due to interruption
             
     except Exception as e:
         logger.error(f"Error handling query for {sid}: {e}")
@@ -244,6 +297,7 @@ async def text_query(sid, data):
 async def stream_audio_to_client(sid: str, text: str):
     """
     Generate audio from text and stream it to the client.
+    Supports interruption - stops streaming if client sends new query.
     
     Args:
         sid: Client session ID
@@ -261,6 +315,15 @@ async def stream_audio_to_client(sid: str, text: str):
         # Generate and stream audio chunks
         chunk_count = 0
         async for audio_chunk in tts_handler.text_to_speech_stream(text):
+            # Check for interruption before sending each chunk
+            if sid in active_responses and active_responses[sid]['interrupted']:
+                logger.info(f"⚠️ Audio streaming interrupted for client {sid} at chunk {chunk_count}")
+                await sio.emit('audio_interrupted', {
+                    'message': 'Audio playback interrupted',
+                    'chunks_sent': chunk_count
+                }, room=sid)
+                return
+            
             if audio_chunk:
                 # Encode audio chunk as base64 for transmission
                 audio_b64 = base64.b64encode(audio_chunk).decode('utf-8')
@@ -274,14 +337,22 @@ async def stream_audio_to_client(sid: str, text: str):
                 
                 chunk_count += 1
         
-        # Signal end of audio stream
-        await sio.emit('audio_end', {
-            'message': 'Audio stream completed',
-            'total_chunks': chunk_count
+        # Only send completion if not interrupted
+        if sid in active_responses and not active_responses[sid]['interrupted']:
+            # Signal end of audio stream
+            await sio.emit('audio_end', {
+                'message': 'Audio stream completed',
+                'total_chunks': chunk_count
+            }, room=sid)
+            
+            logger.info(f"🎵 Audio streaming completed for client {sid} ({chunk_count} chunks)")
+        
+    except asyncio.CancelledError:
+        logger.info(f"⚠️ Audio streaming cancelled for client {sid}")
+        await sio.emit('audio_interrupted', {
+            'message': 'Audio playback cancelled'
         }, room=sid)
-        
-        logger.info(f"🎵 Audio streaming completed for client {sid} ({chunk_count} chunks)")
-        
+        raise
     except Exception as e:
         logger.error(f"Error streaming audio to client {sid}: {e}")
         await sio.emit('error', {
