@@ -21,6 +21,7 @@ class SessionManager:
     
     def __init__(self):
         """Initialize Redis connection and session management."""
+        self.redis_available = False
         try:
             self.redis_client = redis.Redis(
                 host=config.redis_host,
@@ -31,6 +32,7 @@ class SessionManager:
             )
             # Test connection
             self.redis_client.ping()
+            self.redis_available = True
             logger.info("Successfully connected to Redis")
             
             # Initialize LLM for semantic matching
@@ -40,8 +42,10 @@ class SessionManager:
                 openai_api_key=config.openai_api_key
             )
         except Exception as e:
-            logger.error(f"Failed to connect to Redis: {e}")
-            raise
+            logger.warning(f"Failed to connect to Redis: {e}")
+            logger.warning("Running without Redis - session persistence disabled")
+            self.redis_client = None
+            self.llm = None
     
     def create_session(self) -> str:
         """
@@ -51,6 +55,11 @@ class SessionManager:
             Session ID
         """
         session_id = str(uuid4())
+        
+        if not self.redis_available:
+            logger.debug("Redis unavailable - returning session ID without persistence")
+            return session_id
+        
         session_data = {
             "created_at": datetime.now().isoformat(),
             "last_activity": datetime.now().isoformat(),
@@ -68,7 +77,7 @@ class SessionManager:
             return session_id
         except Exception as e:
             logger.error(f"Failed to create session: {e}")
-            raise
+            return session_id  # Return session ID even if Redis fails
     
     def is_session_valid(self, session_id: str) -> bool:
         """

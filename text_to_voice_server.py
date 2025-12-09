@@ -12,9 +12,11 @@ import sys
 import time
 import requests
 import base64
+import io
 from pathlib import Path
 from aiohttp import web
 from typing import Iterator
+from openai import OpenAI
 
 # Load environment variables first
 from dotenv import load_dotenv
@@ -50,14 +52,54 @@ clients = {}
 active_responses = {}  # {sid: {'task': asyncio.Task, 'interrupted': bool}}
 
 
+class SpeechToTextHandler:
+    """Handles speech-to-text conversion using OpenAI Whisper."""
+    
+    def __init__(self):
+        """Initialize STT handler."""
+        from config import config
+        self.client = OpenAI(api_key=config.openai_api_key)
+    
+    async def transcribe_audio(self, audio_data: bytes, audio_format: str = "webm") -> str:
+        """
+        Transcribe audio to text using OpenAI Whisper.
+        
+        Args:
+            audio_data: Audio data as bytes
+            audio_format: Audio format (webm, mp3, wav, etc.)
+            
+        Returns:
+            Transcribed text
+        """
+        try:
+            # Create a file-like object from bytes
+            audio_file = io.BytesIO(audio_data)
+            audio_file.name = f"audio.{audio_format}"
+            
+            # Run in executor to avoid blocking
+            loop = asyncio.get_event_loop()
+            transcript = await loop.run_in_executor(
+                None,
+                lambda: self.client.audio.transcriptions.create(
+                    model="whisper-1",
+                    file=audio_file,
+                    language="en"
+                )
+            )
+            
+            return transcript.text
+            
+        except Exception as e:
+            logger.error(f"Error transcribing audio: {e}")
+            raise
+
+
 class TextToVoiceHandler:
     """Handles text-to-voice conversion and streaming."""
     
     def __init__(self):
         """Initialize TTS handler."""
-        self.baseten_api_key = os.environ.get("BASETEN_API_KEY")
-        if not self.baseten_api_key:
-            raise ValueError("BASETEN_API_KEY not found in environment variables")
+        self.tts_url = "http://51.38.38.66:8081"
     
     async def text_to_speech_stream(self, text: str) -> Iterator[bytes]:
         """
@@ -77,19 +119,29 @@ class TextToVoiceHandler:
             res = await loop.run_in_executor(
                 None,
                 lambda: requests.post(
-                    f"https://model-rwnyv243.api.baseten.co/development/predict",
-                    headers={"Authorization": f"Api-Key {self.baseten_api_key}"},
+                    f"{self.tts_url}/predict",
                     json={"text": text, "language": "en", "chunk_size": 20},
                     stream=True,
+                    timeout=30  # Add timeout
                 )
             )
             
             end = time.perf_counter()
             logger.info(f"Time to make TTS POST request: {end-start}s")
             
-            if res.status_code != 200:
-                logger.error(f"TTS API error: {res.text}")
-                return
+            # Better error handling for different status codes
+            if res.status_code == 502:
+                logger.error(f"TTS API 502 Bad Gateway - Baseten service may be down or model not deployed")
+                raise Exception("Text-to-speech service is temporarily unavailable (502 Bad Gateway). Please try again later.")
+            elif res.status_code == 401:
+                logger.error(f"TTS API 401 Unauthorized - Invalid API key")
+                raise Exception("Text-to-speech authentication failed. Please check API key.")
+            elif res.status_code == 429:
+                logger.error(f"TTS API 429 Rate Limited")
+                raise Exception("Text-to-speech rate limit exceeded. Please try again later.")
+            elif res.status_code != 200:
+                logger.error(f"TTS API error {res.status_code}: {res.text}")
+                raise Exception(f"Text-to-speech service error ({res.status_code}). Please try again later.")
             
             first = True
             for chunk in res.iter_content(chunk_size=512):
@@ -102,8 +154,15 @@ class TextToVoiceHandler:
             
             logger.info(f"⏱️ TTS response elapsed: {res.elapsed}")
             
+        except requests.exceptions.Timeout:
+            logger.error(f"TTS API timeout after 30 seconds")
+            raise Exception("Text-to-speech service timed out. Please try again.")
+        except requests.exceptions.ConnectionError:
+            logger.error(f"TTS API connection error")
+            raise Exception("Cannot connect to text-to-speech service. Please check your internet connection.")
         except Exception as e:
             logger.error(f"Error in text_to_speech_stream: {e}")
+            raise
 
 
 # Initialize TTS handler
@@ -111,6 +170,13 @@ try:
     tts_handler = TextToVoiceHandler()
 except ValueError as e:
     logger.error(f"TTS initialization failed: {e}")
+    sys.exit(1)
+
+# Initialize STT handler
+try:
+    stt_handler = SpeechToTextHandler()
+except Exception as e:
+    logger.error(f"STT initialization failed: {e}")
     sys.exit(1)
 
 
@@ -242,7 +308,7 @@ async def text_query(sid, data):
                     None,
                     chatbot.process_message,
                     query_text,
-                    session_id  # Pass session_id
+                    session_id
                 )
                 
                 # Check if interrupted during processing
@@ -252,11 +318,41 @@ async def text_query(sid, data):
                 
                 logger.info(f"✅ Client {sid} processing completed")
                 
-                # Send text response
+                # Get contact form state to determine chatbox visibility
+                form_state = chatbot.session_manager.get_contact_form_state(session_id)
+                
+                # Determine if chatbox should be visible
+                # Show chatbox when collecting contact information
+                show_chatbox = form_state in [
+                    'asking_consent',
+                    'collecting_name',
+                    'collecting_email',
+                    'collecting_phone',
+                    'collecting_datetime',
+                    'collecting_timezone'
+                ]
+                
+                # Determine current field being collected
+                current_field = None
+                if form_state == 'collecting_name':
+                    current_field = 'name'
+                elif form_state == 'collecting_email':
+                    current_field = 'email'
+                elif form_state == 'collecting_phone':
+                    current_field = 'phone'
+                elif form_state == 'collecting_datetime':
+                    current_field = 'datetime'
+                elif form_state == 'collecting_timezone':
+                    current_field = 'timezone'
+                
+                # Send text response with chatbox visibility flag
                 await sio.emit('text_response', {
                     'message': response,
                     'original_query': query_text,
-                    'type': 'response'
+                    'type': 'response',
+                    'show_chatbox': show_chatbox,  # Flag for frontend
+                    'contact_form_state': form_state,  # For debugging
+                    'current_field': current_field  # Which field is being collected
                 }, room=sid)
                 
                 logger.info(f"📤 Sent text to client {sid}: {response[:50]}...")
@@ -289,6 +385,88 @@ async def text_query(sid, data):
             
     except Exception as e:
         logger.error(f"Error handling query for {sid}: {e}")
+        await sio.emit('error', {
+            'message': str(e)
+        }, room=sid)
+
+
+@sio.event
+async def voice_input(sid, data):
+    """Handle voice input from client."""
+    try:
+        if sid not in clients:
+            await sio.emit('error', {
+                'message': 'Session not found'
+            }, room=sid)
+            return
+        
+        # Extract audio data
+        if isinstance(data, dict):
+            audio_b64 = data.get('audio', '')
+            audio_format = data.get('format', 'webm')
+        else:
+            logger.error(f"Invalid voice input data format from {sid}")
+            await sio.emit('error', {
+                'message': 'Invalid audio data format'
+            }, room=sid)
+            return
+        
+        if not audio_b64:
+            await sio.emit('error', {
+                'message': 'Empty audio data'
+            }, room=sid)
+            return
+        
+        logger.info(f"🎤 Client {sid} sent voice input ({len(audio_b64)} bytes base64)")
+        
+        try:
+            # Decode base64 audio
+            audio_bytes = base64.b64decode(audio_b64)
+            
+            # Validate audio size
+            if len(audio_bytes) < 1000:  # Less than 1KB
+                logger.warning(f"Audio too short from {sid}: {len(audio_bytes)} bytes")
+                await sio.emit('error', {
+                    'message': 'Audio recording too short. Please hold the button longer.'
+                }, room=sid)
+                return
+            
+            # Send transcription status
+            await sio.emit('transcription_start', {
+                'message': 'Transcribing audio...'
+            }, room=sid)
+            
+            # Transcribe audio to text
+            transcribed_text = await stt_handler.transcribe_audio(audio_bytes, audio_format)
+            
+            logger.info(f"📝 Transcribed for {sid}: '{transcribed_text}'")
+            
+            # Send transcription result
+            await sio.emit('transcription_complete', {
+                'text': transcribed_text
+            }, room=sid)
+            
+            # Process as text query (reuse existing logic)
+            # Create a dict with the transcribed text
+            text_data = {'text': transcribed_text}
+            await text_query(sid, text_data)
+            
+        except Exception as e:
+            error_msg = str(e)
+            logger.error(f"Error processing voice input for {sid}: {e}")
+            
+            # Check for specific Whisper API errors
+            if 'could not be decoded' in error_msg or 'format is not supported' in error_msg:
+                await sio.emit('error', {
+                    'message': 'Audio format error. Please try again.'
+                }, room=sid)
+            else:
+                await sio.emit('error', {
+                    'message': f'Voice processing error: {str(e)}'
+                }, room=sid)
+            
+    except Exception as e:
+        logger.error(f"Error handling voice input for {sid}: {e}")
         await sio.emit('error', {
             'message': str(e)
         }, room=sid)
@@ -376,8 +554,21 @@ async def serve_frontend(request):
     except FileNotFoundError:
         return web.Response(text='Frontend HTML file not found', status=404)
 
+# Serve the voice-to-voice interface
+async def serve_voice_interface(request):
+    """Serve the voice-to-voice HTML frontend."""
+    try:
+        html_path = Path(__file__).parent / 'static' / 'voice_to_voice.html'
+        with open(html_path, 'r', encoding='utf-8') as f:
+            html_content = f.read()
+        return web.Response(text=html_content, content_type='text/html')
+    except FileNotFoundError:
+        return web.Response(text='Voice interface HTML file not found', status=404)
+
 # Add routes
-app.router.add_get('/', serve_frontend)
+app.router.add_get('/', serve_voice_interface)  # Default to voice interface
+app.router.add_get('/voice', serve_voice_interface)
+app.router.add_get('/text', serve_frontend)  # Text interface for testing
 app.router.add_get('/health', health)
 
 
@@ -390,9 +581,7 @@ def check_environment():
     if not config.openai_api_key:
         issues.append("OpenAI API key is not set. Please set OPENAI_API_KEY environment variable.")
     
-    # Check Baseten API key
-    if not os.environ.get("BASETEN_API_KEY"):
-        issues.append("BASETEN_API_KEY is not set. Please set BASETEN_API_KEY environment variable.")
+
     
     # Check if data file exists
     if not os.path.exists(config.data_file_path):
