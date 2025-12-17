@@ -190,7 +190,7 @@ async def connect(sid, environ, auth=None):
     try:
         # Create individual session for this client
         chatbot = ChatBot()
-        session_id = chatbot.start_session()  # Get session_id
+        session_id, initial_message = chatbot.start_session()  # Get session_id and welcome message
         
         clients[sid] = {
             'chatbot': chatbot,
@@ -200,13 +200,21 @@ async def connect(sid, environ, auth=None):
         # Initialize interruption tracking for this client
         active_responses[sid] = {'task': None, 'interrupted': False}
         
-        # Send connection status only (no greeting message)
+        # Send connection status
         await sio.emit('status', {
             'message': 'Connected',
             'type': 'success'
         }, room=sid)
         
-        logger.info(f"✅ Session created for client {sid}")
+        # Send initial greeting asking for name
+        await sio.emit('text_response', {
+            'response': initial_message,
+            'message': initial_message,
+            'type': 'initial_greeting',
+            'show_chatbox': True
+        }, room=sid)
+        
+        logger.info(f"✅ Session created for client {sid} with initial greeting")
         
         # No automatic greeting - wait for user input
         
@@ -238,6 +246,60 @@ async def disconnect(sid):
     # Clean up interruption tracking
     if sid in active_responses:
         del active_responses[sid]
+
+
+@sio.event
+async def text_only_query(sid, data):
+    """Handle text-only query from client (no audio response)."""
+    try:
+        if sid not in clients:
+            await sio.emit('error_response', {
+                'message': 'Session not found'
+            }, room=sid)
+            return
+        
+        # Extract query text
+        if isinstance(data, dict):
+            query_text = data.get('message', '') or data.get('query', '') or data.get('text', '')
+        else:
+            query_text = str(data)
+        
+        if not query_text or not query_text.strip():
+            await sio.emit('error_response', {
+                'message': 'Empty query'
+            }, room=sid)
+            return
+        
+        client_data = clients[sid]
+        chatbot = client_data['chatbot']
+        session_id = client_data['session_id']
+        
+        logger.info(f"💬 Text-only query from {sid}: '{query_text}'")
+        
+        # Process query through chatbot
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            chatbot.process_message,
+            query_text,
+            session_id
+        )
+        
+        logger.info(f"✅ Text-only response for {sid}: {response[:50]}...")
+        
+        # Send ONLY text response (no audio)
+        await sio.emit('text_response', {
+            'response': response,
+            'message': response,
+            'original_query': query_text,
+            'type': 'text_only'
+        }, room=sid)
+        
+    except Exception as e:
+        logger.error(f"Error handling text-only query for {sid}: {e}")
+        await sio.emit('error_response', {
+            'message': str(e)
+        }, room=sid)
 
 
 @sio.event
@@ -322,8 +384,11 @@ async def text_query(sid, data):
                 form_state = chatbot.session_manager.get_contact_form_state(session_id)
                 
                 # Determine if chatbox should be visible
-                # Show chatbox when collecting contact information
+                # Show chatbox when collecting initial user details or contact information
                 show_chatbox = form_state in [
+                    'initial_collecting_name',
+                    'initial_collecting_email',
+                    'initial_collecting_phone',
                     'asking_consent',
                     'collecting_name',
                     'collecting_email',
@@ -334,11 +399,11 @@ async def text_query(sid, data):
                 
                 # Determine current field being collected
                 current_field = None
-                if form_state == 'collecting_name':
+                if form_state in ['collecting_name', 'initial_collecting_name']:
                     current_field = 'name'
-                elif form_state == 'collecting_email':
+                elif form_state in ['collecting_email', 'initial_collecting_email']:
                     current_field = 'email'
-                elif form_state == 'collecting_phone':
+                elif form_state in ['collecting_phone', 'initial_collecting_phone']:
                     current_field = 'phone'
                 elif form_state == 'collecting_datetime':
                     current_field = 'datetime'
@@ -612,7 +677,7 @@ if __name__ == '__main__':
             sys.exit(1)
         
         # Start the Socket.IO server
-        main(host='0.0.0.0', port=5000)
+        main(host='0.0.0.0', port=5001)
         
     except KeyboardInterrupt:
         print("\n👋 Server shutting down...")

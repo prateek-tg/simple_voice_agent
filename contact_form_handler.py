@@ -81,6 +81,52 @@ Would you like us to contact you? Just reply with 'yes' or 'no'."""
         
         user_input = user_input.strip()
         
+        # Handle INITIAL collection (at session start)
+        if form_state == ContactFormState.INITIAL_COLLECTING_NAME.value:
+            is_valid, error = validate_name(user_input)
+            if not is_valid:
+                return {
+                    'next_state': form_state,
+                    'response': f"{error} Please provide your full name:",
+                    'form_data': form_data
+                }
+            form_data['name'] = user_input
+            return {
+                'next_state': ContactFormState.INITIAL_COLLECTING_EMAIL.value,
+                'response': f"Thanks, {user_input}! What's your email address?",
+                'form_data': form_data
+            }
+        
+        elif form_state == ContactFormState.INITIAL_COLLECTING_EMAIL.value:
+            is_valid, error = validate_email(user_input)
+            if not is_valid:
+                return {
+                    'next_state': form_state,
+                    'response': f"{error} Please provide a valid email address:",
+                    'form_data': form_data
+                }
+            form_data['email'] = user_input
+            return {
+                'next_state': ContactFormState.INITIAL_COLLECTING_PHONE.value,
+                'response': "Perfect! What's your mobile number? Please include your country code.",
+                'form_data': form_data
+            }
+        
+        elif form_state == ContactFormState.INITIAL_COLLECTING_PHONE.value:
+            is_valid, error = validate_phone(user_input)
+            if not is_valid:
+                return {
+                    'next_state': form_state,
+                    'response': f"{error} Please provide your mobile number:",
+                    'form_data': form_data
+                }
+            form_data['mobile'] = user_input
+            return {
+                'next_state': ContactFormState.IDLE.value,
+                'response': f"Thank you! I now have your details. How can I assist you today?",
+                'form_data': form_data  # Keep the data for later use
+            }
+        
         # Handle consent
         if form_state == ContactFormState.ASKING_CONSENT.value:
             if user_input.lower() in ['yes', 'y', 'sure', 'ok', 'okay', 'yeah']:
@@ -124,7 +170,7 @@ Would you like us to contact you? Just reply with 'yes' or 'no'."""
             form_data['email'] = user_input
             return {
                 'next_state': ContactFormState.COLLECTING_PHONE.value,
-                'response': "Perfect! What's your mobile number with country code? (e.g., +911234567890)",
+                'response': "Perfect! What's your mobile number? Please include your country code.",
                 'form_data': form_data
             }
         
@@ -140,7 +186,7 @@ Would you like us to contact you? Just reply with 'yes' or 'no'."""
             form_data['mobile'] = user_input
             return {
                 'next_state': ContactFormState.COLLECTING_DATETIME.value,
-                'response': "Got it! When would you prefer us to contact you? You can specify in any format (e.g., '1 December 2025 at 11pm', '2025-12-01 14:00', 'tomorrow at 3pm')",
+                'response': "Got it! When would you prefer us to contact you? You can specify in any format.",
                 'form_data': form_data
             }
         
@@ -194,15 +240,7 @@ Would you like us to contact you? Just reply with 'yes' or 'no'."""
             
             return {
                 'next_state': ContactFormState.COMPLETED.value,
-                'response': f"""All set! We've recorded your request and our team will contact you at {form_data['preferred_datetime']} ({user_input}). 
-
-Here's what we have:
-• Name: {form_data['name']}
-• Email: {form_data['email']}
-• Phone: {form_data['mobile']}
-• Preferred Time: {form_data['preferred_datetime']} ({user_input})
-
-Is there anything else I can help you with?""",
+                'response': "All set! We've recorded your request and our team will contact you. Is there anything else I can help you with?",
                 'form_data': {}  # Clear form data after completion
             }
         

@@ -49,7 +49,7 @@ class SessionManager:
     
     def create_session(self) -> str:
         """
-        Create a new session.
+        Create a new session and initialize with user details collection.
         
         Returns:
             Session ID
@@ -73,7 +73,11 @@ class SessionManager:
                 config.session_timeout,
                 json.dumps(session_data)
             )
-            logger.info(f"Created new session: {session_id}")
+            
+            # Initialize contact form state to collect user details
+            self.set_contact_form_state(session_id, "initial_collecting_name")
+            
+            logger.info(f"Created new session: {session_id} with initial user details collection")
             return session_id
         except Exception as e:
             logger.error(f"Failed to create session: {e}")

@@ -27,7 +27,7 @@ def main():
         # Run the server
         start_server(
             host='0.0.0.0',
-            port=5000
+            port=5001
         )
         
     except KeyboardInterrupt:

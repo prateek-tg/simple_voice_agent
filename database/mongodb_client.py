@@ -191,6 +191,87 @@ class MongoDBClient:
             logger.error(f"Error retrieving pending requests: {e}")
             return []
     
+    def save_session_conversation(
+        self,
+        session_id: str,
+        conversation_history: List[Dict[str, Any]],
+        user_details: Optional[Dict[str, Any]] = None
+    ) -> Optional[str]:
+        """
+        Save entire session conversation to MongoDB.
+        
+        Args:
+            session_id: Session ID
+            conversation_history: List of message dictionaries with role and content
+            user_details: Optional user details (name, email, phone)
+            
+        Returns:
+            Inserted document ID as string, or None if failed
+        """
+        try:
+            collection = self.db["sessions"]
+            
+            session_doc = {
+                "session_id": session_id,
+                "conversation_history": conversation_history,
+                "user_details": user_details or {},
+                "created_at": datetime.utcnow(),
+                "message_count": len(conversation_history)
+            }
+            
+            logger.info(f"Saving session conversation for {session_id}")
+            logger.info(f"Database: {self.db.name}, Collection: sessions")
+            logger.info(f"Conversation has {len(conversation_history)} messages")
+            
+            result = collection.insert_one(session_doc)
+            
+            logger.info(f"✅ Successfully saved session conversation: {result.inserted_id}")
+            
+            # Verify the write by reading it back
+            verify = collection.find_one({"_id": result.inserted_id})
+            if verify:
+                logger.info(f"✅ Verified: Document exists in MongoDB (session_id: {verify.get('session_id')})")
+                logger.info(f"   Database: {self.db.name}, Collection: {collection.name}")
+            else:
+                logger.error(f"❌ Warning: Document not found after insert!")
+            
+            return str(result.inserted_id)
+            
+        except PyMongoError as e:
+            logger.error(f"❌ Error saving session conversation: {e}")
+            return None
+    
+    def list_collections(self) -> List[str]:
+        """
+        List all collections in the database.
+        
+        Returns:
+            List of collection names
+        """
+        try:
+            collections = self.db.list_collection_names()
+            logger.info(f"Collections in database '{self.db.name}': {collections}")
+            return collections
+        except PyMongoError as e:
+            logger.error(f"Error listing collections: {e}")
+            return []
+    
+    def get_session_count(self) -> int:
+        """
+        Get total count of sessions saved.
+        
+        Returns:
+            Number of session documents
+        """
+        try:
+            collection = self.db["sessions"]
+            count = collection.count_documents({})
+            logger.info(f"Total sessions in database: {count}")
+            return count
+        except PyMongoError as e:
+            logger.error(f"Error counting sessions: {e}")
+            return 0
+    
     def close(self):
         """Close MongoDB connection."""
         if self.client:
@@ -204,3 +285,4 @@ class MongoDBClient:
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit."""
         self.close()
+

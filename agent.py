@@ -32,12 +32,18 @@ class IntentType(Enum):
 class ContactFormState(Enum):
     """Contact form collection states."""
     IDLE = "idle"
+    # Initial collection at session start
+    INITIAL_COLLECTING_NAME = "initial_collecting_name"
+    INITIAL_COLLECTING_EMAIL = "initial_collecting_email"
+    INITIAL_COLLECTING_PHONE = "initial_collecting_phone"
+    # Connect with team - only collect availability
     ASKING_CONSENT = "asking_consent"
+    COLLECTING_DATETIME = "collecting_datetime"
+    COLLECTING_TIMEZONE = "collecting_timezone"
+    # Legacy states (for backward compatibility)
     COLLECTING_NAME = "collecting_name"
     COLLECTING_EMAIL = "collecting_email"
     COLLECTING_PHONE = "collecting_phone"
-    COLLECTING_DATETIME = "collecting_datetime"
-    COLLECTING_TIMEZONE = "collecting_timezone"
     COMPLETED = "completed"
 
 
@@ -70,6 +76,14 @@ class ChatbotAgent:
             if config.mongodb_uri:
                 self.mongodb_client = MongoDBClient(config.mongodb_uri, config.mongodb_database)
                 logger.info("MongoDB client initialized for contact requests")
+                
+                # List all collections for debugging
+                collections = self.mongodb_client.list_collections()
+                logger.info(f"Available MongoDB collections: {collections}")
+                
+                # Get session count
+                session_count = self.mongodb_client.get_session_count()
+                logger.info(f"Total sessions stored: {session_count}")
             else:
                 self.mongodb_client = None
                 logger.warning("MongoDB URI not configured - contact requests will not be saved")
@@ -580,20 +594,32 @@ Your Personality:
 - Mirror the user's energy level (excited -> enthusiastic, calm -> measured)
 
 Your Communication Style:
-- Think out loud sometimes ("Let me see...", "Hmm, that's a great question...", "Okay, so...")
+- Think out loud sometimes ("Let me see...", "Okay, so...", "Alright...")
 - Use conversational bridges ("So here's the thing...", "Actually...", "You know what...", "And get this...")
 - Mix short and long sentences naturally for better rhythm
 - Use contractions (we're, it's, you'll, that's)
 - Add occasional emphasis ("really important", "absolutely", "definitely", "honestly")
-- Vary your opening acknowledgments:
-  * "Oh, that's a good one!"
-  * "I'm glad you asked about that!"
-  * "You know, that's something a lot of people wonder about..."
-  * "Great question!"
-  * "I totally get that..."
-  * "That's a really important point..."
+
+🔴 CRITICAL - VARIED ACKNOWLEDGMENTS:
+NEVER use the same opening phrase repeatedly! Generate UNIQUE, NATURAL acknowledgments for each response.
+- Sometimes start directly with the answer (no acknowledgment needed)
+- Sometimes acknowledge the topic naturally: "So about [topic]...", "Regarding [topic]...", "When it comes to [topic]..."
+- Sometimes show understanding: "I see what you're asking about...", "You're curious about...", "You want to know about..."
+- Sometimes be casual: "Okay, so...", "Alright...", "Let me tell you about..."
+- Sometimes be thoughtful: "Hmm, let me explain...", "Here's how this works...", "This is an interesting one..."
+- Avoid repetitive phrases like "Great question!" "That's a good one!" - these should be rare exceptions, not defaults
+- Be creative and natural - imagine you're having a real conversation with a friend
+
 - Use rhetorical questions to engage ("Why is this important? Well...", "What does this mean for you?")
 - End responses naturally - not always with a question. Sometimes just end with the answer.
+
+🔴 CRITICAL - CONCISENESS:
+- Keep responses SHORT and to the point
+- For simple questions: 2-3 sentences maximum
+- For complex questions: 3-4 sentences maximum
+- Focus on the CORE answer, reduce additional details
+- Avoid over-explaining or adding too many examples
+- Get to the point quickly, then stop
 
 Emotional Intelligence & Empathy:
 - If user seems confused -> Be extra patient, use analogies, break things down

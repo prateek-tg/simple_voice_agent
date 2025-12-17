@@ -39,22 +39,23 @@ class ChatBot:
             logger.error(f"Failed to initialize ChatBot: {e}")
             raise
     
-    def start_session(self) -> str:
+    def start_session(self) -> tuple[str, str]:
         """
-        Start a new chat session and return the session ID.
+        Start a new chat session and return the session ID and initial message.
         
         IMPORTANT: Session ID is NOT stored as instance variable.
         Caller must store and pass it to other methods.
         
         Returns:
-            Session ID (UUID string)
+            Tuple of (session_id, initial_message)
         """
         try:
             session_id = self.session_manager.create_session()
             logger.info(f"Started new session: {session_id}")
             
-            # No welcome message - wait for user to send first message
-            return session_id
+            # Return welcome message asking for name
+            initial_message = "Hello! Welcome to TechGropse. Before we begin, I'd like to know you better. What's your name?"
+            return session_id, initial_message
             
         except Exception as e:
             logger.error(f"Failed to start session: {e}")
@@ -62,13 +63,30 @@ class ChatBot:
     
     def end_session(self, session_id: str):
         """
-        End the session and clear cache.
+        End the session, save conversation to MongoDB, and clear cache.
         
         Args:
             session_id: Session ID to end
         """
         try:
             if session_id:
+                # Get conversation history and user details before clearing
+                conversation_history = self.session_manager.get_session_history(session_id)
+                user_details = self.session_manager.get_contact_form_data(session_id)
+                
+                # Save to MongoDB if we have mongodb_client
+                if self.agent.mongodb_client and conversation_history:
+                    try:
+                        self.agent.mongodb_client.save_session_conversation(
+                            session_id=session_id,
+                            conversation_history=conversation_history,
+                            user_details=user_details
+                        )
+                        logger.info(f"Saved conversation for session {session_id} to MongoDB")
+                    except Exception as e:
+                        logger.error(f"Failed to save conversation to MongoDB: {e}")
+                
+                # Clear session
                 self.session_manager.clear_session(session_id)
                 logger.info(f"Ended session: {session_id}")
                 print("\n👋 Session ended. Thank you for using TechGropse Virtual Representative!")
@@ -101,7 +119,7 @@ class ChatBot:
             except Exception:
                 logger.debug("Unable to append message to history")
 
-            # Check if we're in contact form flow
+            # Check if we're in contact form flow (including initial collection)
             form_state = self.session_manager.get_contact_form_state(session_id)
             
             if form_state != ContactFormState.IDLE.value:
@@ -142,13 +160,22 @@ class ChatBot:
 
             # Check if user explicitly requested contact (new intent type)
             if intent == 'contact_request':
-                # User explicitly asked to be contacted - skip consent, go straight to name collection
-                form_data = {'original_query': user_input}
-                self.session_manager.set_contact_form_data(session_id, form_data)
+                # User explicitly asked to be contacted
+                # Check if we already have user details
+                user_details = self.session_manager.get_contact_form_data(session_id)
                 
-                # Skip consent step and go directly to collecting name
-                self.session_manager.set_contact_form_state(session_id, ContactFormState.COLLECTING_NAME.value)
-                response = ContactFormHandler.ask_for_contact_consent(user_input, is_explicit_request=True)
+                if user_details and user_details.get('name') and user_details.get('email') and user_details.get('mobile'):
+                    # We have user details, only ask for availability
+                    user_details['original_query'] = user_input
+                    self.session_manager.set_contact_form_data(session_id, user_details)
+                    self.session_manager.set_contact_form_state(session_id, ContactFormState.COLLECTING_DATETIME.value)
+                    response = f"Great! I'll connect you with our team. When would be the best time for them to reach out to you? Please provide your preferred date and time."
+                else:
+                    # Missing user details - collect them first
+                    form_data = {'original_query': user_input}
+                    self.session_manager.set_contact_form_data(session_id, form_data)
+                    self.session_manager.set_contact_form_state(session_id, ContactFormState.COLLECTING_NAME.value)
+                    response = ContactFormHandler.ask_for_contact_consent(user_input, is_explicit_request=True)
                 
                 # Append bot response to history
                 try:
@@ -156,7 +183,7 @@ class ChatBot:
                 except Exception:
                     logger.debug("Unable to append bot response to history")
                 
-                logger.info(f"Session {session_id}: Intent=contact_request, Skipped consent, collecting name")
+                logger.info(f"Session {session_id}: Intent=contact_request")
                 return response
 
             # Check if contact form should be triggered (fallback detection)
