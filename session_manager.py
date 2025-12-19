@@ -22,6 +22,13 @@ class SessionManager:
     def __init__(self):
         """Initialize Redis connection and session management."""
         self.redis_available = False
+        
+        # In-memory fallback storage for when Redis is unavailable
+        self.memory_sessions = {}  # {session_id: session_data}
+        self.memory_contact_states = {}  # {session_id: state}
+        self.memory_contact_data = {}  # {session_id: data}
+        self.memory_history = {}  # {session_id: [messages]}
+        
         try:
             self.redis_client = redis.Redis(
                 host=config.redis_host,
@@ -43,7 +50,7 @@ class SessionManager:
             )
         except Exception as e:
             logger.warning(f"Failed to connect to Redis: {e}")
-            logger.warning("Running without Redis - session persistence disabled")
+            logger.warning("Running without Redis - using in-memory session storage")
             self.redis_client = None
             self.llm = None
     
@@ -56,15 +63,19 @@ class SessionManager:
         """
         session_id = str(uuid4())
         
-        if not self.redis_available:
-            logger.debug("Redis unavailable - returning session ID without persistence")
-            return session_id
-        
         session_data = {
             "created_at": datetime.now().isoformat(),
             "last_activity": datetime.now().isoformat(),
             "query_count": 0
         }
+        
+        if not self.redis_available:
+            # Store in memory
+            self.memory_sessions[session_id] = session_data
+            self.memory_contact_states[session_id] = "initial_collecting_name"
+            self.memory_history[session_id] = []
+            logger.info(f"Created new session in memory: {session_id}")
+            return session_id
         
         try:
             # Store session data with expiration
@@ -93,6 +104,9 @@ class SessionManager:
         Returns:
             True if session is valid, False otherwise
         """
+        if not self.redis_available:
+            return session_id in self.memory_sessions
+        
         try:
             return self.redis_client.exists(f"session:{session_id}")
         except Exception as e:
@@ -109,6 +123,13 @@ class SessionManager:
         Returns:
             True if updated successfully, False otherwise
         """
+        if not self.redis_available:
+            if session_id in self.memory_sessions:
+                self.memory_sessions[session_id]["last_activity"] = datetime.now().isoformat()
+                self.memory_sessions[session_id]["query_count"] = self.memory_sessions[session_id].get("query_count", 0) + 1
+                return True
+            return False
+        
         try:
             session_key = f"session:{session_id}"
             session_data_str = self.redis_client.get(session_key)
@@ -218,6 +239,13 @@ class SessionManager:
         Returns:
             True if appended successfully, False otherwise
         """
+        if not self.redis_available:
+            if session_id not in self.memory_history:
+                self.memory_history[session_id] = []
+            entry = {"role": role, "message": message, "ts": datetime.now().isoformat()}
+            self.memory_history[session_id].append(entry)
+            return True
+        
         try:
             history_key = f"session:{session_id}:history"
             entry = json.dumps({"role": role, "message": message, "ts": datetime.now().isoformat()})
@@ -241,6 +269,12 @@ class SessionManager:
         Returns:
             List of history entries as dicts
         """
+        if not self.redis_available:
+            history = self.memory_history.get(session_id, [])
+            if limit is not None and limit > 0:
+                return history[-limit:]
+            return history
+        
         try:
             history_key = f"session:{session_id}:history"
             items = self.redis_client.lrange(history_key, 0, -1)
@@ -310,6 +344,15 @@ class SessionManager:
         Returns:
             True if cleared successfully, False otherwise
         """
+        if not self.redis_available:
+            # Clear from memory
+            self.memory_sessions.pop(session_id, None)
+            self.memory_contact_states.pop(session_id, None)
+            self.memory_contact_data.pop(session_id, None)
+            self.memory_history.pop(session_id, None)
+            logger.info(f"Cleared session from memory: {session_id}")
+            return True
+        
         try:
             # Delete session data
             session_key = f"session:{session_id}"
@@ -477,6 +520,9 @@ Respond with only the NUMBER (1, 2, 3, etc.) or NONE:"""
         Returns:
             Contact form state (default: 'idle')
         """
+        if not self.redis_available:
+            return self.memory_contact_states.get(session_id, "idle")
+        
         try:
             state_key = f"session:{session_id}:contact_form_state"
             state = self.redis_client.get(state_key)
@@ -496,6 +542,10 @@ Respond with only the NUMBER (1, 2, 3, etc.) or NONE:"""
         Returns:
             True if set successfully, False otherwise
         """
+        if not self.redis_available:
+            self.memory_contact_states[session_id] = state
+            return True
+        
         try:
             state_key = f"session:{session_id}:contact_form_state"
             self.redis_client.setex(state_key, config.session_timeout, state)
@@ -514,6 +564,9 @@ Respond with only the NUMBER (1, 2, 3, etc.) or NONE:"""
         Returns:
             Contact form data dictionary
         """
+        if not self.redis_available:
+            return self.memory_contact_data.get(session_id, {})
+        
         try:
             data_key = f"session:{session_id}:contact_form_data"
             data_str = self.redis_client.get(data_key)
@@ -533,6 +586,10 @@ Respond with only the NUMBER (1, 2, 3, etc.) or NONE:"""
         Returns:
             True if set successfully, False otherwise
         """
+        if not self.redis_available:
+            self.memory_contact_data[session_id] = data
+            return True
+        
         try:
             data_key = f"session:{session_id}:contact_form_data"
             self.redis_client.setex(data_key, config.session_timeout, json.dumps(data))

@@ -165,12 +165,124 @@ class TextToVoiceHandler:
             raise
 
 
-# Initialize TTS handler
+class AWSPollyTTSHandler:
+    """Handles text-to-speech conversion using AWS Polly."""
+    
+    def __init__(self):
+        """Initialize AWS Polly TTS handler."""
+        from config import config
+        
+        # Validate AWS credentials
+        if not config.aws_access_key_id or not config.aws_secret_access_key:
+            raise ValueError(
+                "AWS credentials are required for Polly TTS. "
+                "Please set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY environment variables."
+            )
+        
+        try:
+            import boto3
+            from contextlib import closing
+            
+            self.polly = boto3.client(
+                'polly',
+                region_name=config.aws_region,
+                aws_access_key_id=config.aws_access_key_id,
+                aws_secret_access_key=config.aws_secret_access_key
+            )
+            self.voice_id = config.polly_voice_id
+            self.output_format = config.polly_output_format
+            self.closing = closing
+            
+            logger.info(f"✅ AWS Polly TTS initialized (region: {config.aws_region}, voice: {self.voice_id})")
+            
+        except ImportError:
+            raise ImportError("boto3 is required for AWS Polly TTS. Install it with: pip install boto3")
+        except Exception as e:
+            logger.error(f"Failed to initialize AWS Polly client: {e}")
+            raise
+    
+    async def text_to_speech_stream(self, text: str) -> Iterator[bytes]:
+        """
+        Convert text to speech using AWS Polly and return audio stream.
+        
+        Args:
+            text: Text to convert to speech
+            
+        Yields:
+            Audio chunks as bytes
+        """
+        start = time.perf_counter()
+        
+        try:
+            logger.info(f"🔊 Generating speech with AWS Polly (voice: {self.voice_id})")
+            
+            # Make async request to AWS Polly
+            # Use MP3 format for better browser compatibility
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: self.polly.synthesize_speech(
+                    Text=text,
+                    OutputFormat='mp3',  # MP3 format for browser compatibility
+                    VoiceId=self.voice_id
+                )
+            )
+            
+            end = time.perf_counter()
+            logger.info(f"Time to get Polly response: {end-start}s")
+            
+            # Stream audio data in chunks
+            with self.closing(response['AudioStream']) as stream:
+                chunk_size = 1024  # 1KB chunks
+                first = True
+                
+                while True:
+                    # Read chunk from stream
+                    chunk = await loop.run_in_executor(None, stream.read, chunk_size)
+                    
+                    if first and chunk:
+                        end = time.perf_counter()
+                        logger.info(f"Time to first audio chunk: {end-start}s")
+                        first = False
+                    
+                    if not chunk:
+                        break
+                    
+                    yield chunk
+            
+            logger.info(f"✅ AWS Polly TTS streaming completed")
+            
+        except self.polly.exceptions.TextLengthExceededException:
+            logger.error("Text is too long for AWS Polly (max 3000 characters)")
+            raise Exception("Text is too long for speech synthesis. Please shorten your message.")
+        except self.polly.exceptions.InvalidSsmlException:
+            logger.error("Invalid SSML in text")
+            raise Exception("Invalid text format for speech synthesis.")
+        except self.polly.exceptions.ServiceFailureException:
+            logger.error("AWS Polly service failure")
+            raise Exception("Text-to-speech service is temporarily unavailable. Please try again later.")
+        except Exception as e:
+            logger.error(f"Error in AWS Polly text_to_speech_stream: {e}")
+            raise Exception(f"Text-to-speech error: {str(e)}")
+
+
+
+
+
+# Initialize AWS Polly TTS handler
 try:
-    tts_handler = TextToVoiceHandler()
+    logger.info("🔧 Initializing AWS Polly TTS handler...")
+    tts_handler = AWSPollyTTSHandler()
+    logger.info("✅ AWS Polly TTS handler ready")
+        
 except ValueError as e:
     logger.error(f"TTS initialization failed: {e}")
+    logger.error("Please ensure AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are set in .env file")
     sys.exit(1)
+except Exception as e:
+    logger.error(f"Unexpected error during TTS initialization: {e}")
+    sys.exit(1)
+
 
 # Initialize STT handler
 try:
@@ -574,8 +686,7 @@ async def stream_audio_to_client(sid: str, text: str):
                 await sio.emit('audio_chunk', {
                     'data': audio_b64,
                     'chunk_id': chunk_count,
-                    'format': 's16le',  # 16-bit signed little-endian
-                    'sample_rate': 24000
+                    'format': 'mp3'  # MP3 format
                 }, room=sid)
                 
                 chunk_count += 1
@@ -677,7 +788,7 @@ if __name__ == '__main__':
             sys.exit(1)
         
         # Start the Socket.IO server
-        main(host='0.0.0.0', port=5001)
+        main(host='0.0.0.0', port=5000)
         
     except KeyboardInterrupt:
         print("\n👋 Server shutting down...")

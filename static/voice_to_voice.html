@@ -128,6 +128,7 @@
                 transform: translate(-50%, -50%) scale(1);
                 opacity: 0.8;
             }
+
             100% {
                 transform: translate(-50%, -50%) scale(1.8);
                 opacity: 0;
@@ -170,6 +171,7 @@
         }
 
         @keyframes pulse {
+
             0%,
             100% {
                 transform: scale(1);
@@ -183,12 +185,16 @@
         }
 
         @keyframes wobble {
-            0%, 100% {
+
+            0%,
+            100% {
                 transform: rotate(0deg) scale(1);
             }
+
             25% {
                 transform: rotate(-3deg) scale(1.02);
             }
+
             75% {
                 transform: rotate(3deg) scale(1.02);
             }
@@ -308,6 +314,7 @@
                 opacity: 0;
                 transform: translateY(10px);
             }
+
             to {
                 opacity: 1;
                 transform: translateY(0);
@@ -445,7 +452,7 @@
 
     <script>
         // Initialize Socket.IO connection
-        const socket = io('http://0.0.0.0:5001');
+        const socket = io('http://0.0.0.0:5000');
 
         // DOM elements
         const voiceButton = document.getElementById('voiceButton');
@@ -572,69 +579,91 @@
             }
         }
 
-        // Play audio chunk
+        // Audio playback for MP3
+        let audioChunksBuffer = [];
+        let currentAudio = null;
+
+        // Play audio chunk (MP3 format)
         async function playAudioChunk(base64Data) {
-            if (!audioContext) {
-                await initAudioContext();
+            try {
+                // Add chunk to buffer
+                audioChunksBuffer.push(base64Data);
+            } catch (error) {
+                console.error('Error buffering audio:', error);
             }
+        }
+
+        // Play complete MP3 audio
+        async function playCompleteAudio() {
+            if (audioChunksBuffer.length === 0) return;
 
             try {
-                const binaryString = atob(base64Data);
-                const arrayBuffer = new ArrayBuffer(binaryString.length);
-                const uint8Array = new Uint8Array(arrayBuffer);
+                // Combine all chunks
+                const binaryStrings = audioChunksBuffer.map(chunk => atob(chunk));
+                const totalLength = binaryStrings.reduce((acc, str) => acc + str.length, 0);
 
-                for (let i = 0; i < binaryString.length; i++) {
-                    uint8Array[i] = binaryString.charCodeAt(i);
+                const arrayBuffer = new Uint8Array(totalLength);
+                let offset = 0;
+
+                for (const binaryString of binaryStrings) {
+                    for (let i = 0; i < binaryString.length; i++) {
+                        arrayBuffer[offset++] = binaryString.charCodeAt(i);
+                    }
                 }
 
-                const audioBuffer = audioContext.createBuffer(1, arrayBuffer.byteLength / 2, 24000);
-                const channelData = audioBuffer.getChannelData(0);
+                // Create blob and play
+                const blob = new Blob([arrayBuffer], { type: 'audio/mpeg' });
+                const audioUrl = URL.createObjectURL(blob);
 
-                for (let i = 0; i < channelData.length; i++) {
-                    const sample = (uint8Array[i * 2] | (uint8Array[i * 2 + 1] << 8));
-                    channelData[i] = sample < 32768 ? sample / 32768 : (sample - 65536) / 32768;
-                }
+                currentAudio = new Audio(audioUrl);
+                currentAudio.play();
 
-                const source = audioContext.createBufferSource();
-                source.buffer = audioBuffer;
-                source.connect(audioContext.destination);
-
-                const now = audioContext.currentTime;
-                if (isFirstChunk) {
-                    nextPlayTime = now + 0.1;
-                    isFirstChunk = false;
-                }
-
-                const startTime = Math.max(now, nextPlayTime);
-                source.start(startTime);
-                activeSources.push(source);
-
-                source.onended = () => {
-                    const index = activeSources.indexOf(source);
-                    if (index > -1) activeSources.splice(index, 1);
+                currentAudio.onended = () => {
+                    URL.revokeObjectURL(audioUrl);
+                    currentAudio = null;
+                    isPlayingAudio = false;
+                    voiceButton.textContent = '🎤';
+                    voiceButton.classList.remove('speaking');
+                    statusText.classList.remove('hidden');
+                    statusText.textContent = 'Hold to speak';
+                    voiceButton.disabled = false;
                 };
 
-                nextPlayTime = startTime + audioBuffer.duration;
+                currentAudio.onerror = (e) => {
+                    console.error('Audio playback error:', e);
+                    URL.revokeObjectURL(audioUrl);
+                    currentAudio = null;
+                    isPlayingAudio = false;
+                };
+
             } catch (error) {
-                console.error('Error playing audio:', error);
+                console.error('Error playing complete audio:', error);
+                isPlayingAudio = false;
             }
         }
 
         // Stop all audio
         function stopAllAudio() {
-            activeSources.forEach(source => {
-                try {
-                    source.stop(0);
-                } catch (e) { }
-            });
-            activeSources = [];
-            nextPlayTime = 0;
+            // Stop current audio if playing
+            if (currentAudio) {
+                currentAudio.pause();
+                currentAudio.currentTime = 0;
+                currentAudio = null;
+            }
+
+            // Clear buffer
+            audioChunksBuffer = [];
+
             isPlayingAudio = false;
-            isFirstChunk = true;
             audioIndicator.classList.remove('show');
 
-            // Ensure button is enabled when audio stops
+            // Reset UI
+            voiceButton.textContent = '🎤';
+            voiceButton.classList.remove('speaking');
             voiceButton.disabled = false;
+            statusText.classList.remove('hidden');
+            statusText.textContent = 'Hold to speak';
+
             console.log('All audio stopped, button enabled');
         }
 
@@ -711,10 +740,10 @@
             console.log('Connected to server');
             connectionStatus.textContent = '✅';
             connectionStatus.className = 'connection-status connected';
-            
+
             // Initialize microphone on connection
             await initMicrophone();
-            
+
             voiceButton.disabled = false;
             statusText.textContent = 'Hold to speak';
         });
@@ -725,7 +754,7 @@
             connectionStatus.className = 'connection-status disconnected';
             voiceButton.disabled = true;
             statusText.textContent = 'Disconnected';
-            
+
             // Clean up media stream on disconnect
             if (mediaStream) {
                 mediaStream.getTracks().forEach(track => track.stop());
@@ -766,13 +795,14 @@
         socket.on('audio_start', (data) => {
             console.log('Audio starting');
             isPlayingAudio = true;
-            isFirstChunk = true;
-            nextPlayTime = 0;
-            
+
+            // Clear previous audio buffer
+            audioChunksBuffer = [];
+
             // Change icon to speaker and add wobble animation
             voiceButton.textContent = '🔊';
             voiceButton.classList.add('speaking');
-            
+
             // Hide status text
             statusText.classList.add('hidden');
         });
@@ -783,20 +813,13 @@
             }
         });
 
-        socket.on('audio_end', (data) => {
-            console.log('Audio ended');
-            // Immediately mark as not playing
-            isPlayingAudio = false;
+        socket.on('audio_end', async (data) => {
+            console.log('Audio ended, playing buffered MP3 audio');
 
-            // Change icon back to mic and remove wobble
-            voiceButton.textContent = '🎤';
-            voiceButton.classList.remove('speaking');
-            
-            // Show status text again
-            setTimeout(() => {
-                statusText.classList.remove('hidden');
-                statusText.textContent = 'Hold to speak';
-            }, 300);
+            // Play the complete buffered audio
+            await playCompleteAudio();
+
+            // Note: UI updates are handled in playCompleteAudio's onended callback
         });
 
         socket.on('error', (data) => {
